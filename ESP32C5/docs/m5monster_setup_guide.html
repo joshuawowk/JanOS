@@ -1,0 +1,526 @@
+<title>M5MonsterC5 Setup Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ---- Dark-first, theme-aware tokens. Bare :root = dark (primary look). ---- */
+:root{
+  --bg:#0b0f14; --panel:#131a22; --panel-2:#0f151c; --line:#22303f;
+  --text:#e6edf3; --muted:#8a97a6; --faint:#5a6a79;
+  --accent:#4dd0e1; --accent-soft:rgba(77,208,225,.14);
+  --rf:#f5a623; --rf-soft:rgba(245,166,35,.14);
+  --green:#2ecc71; --red:#e74c3c; --blue:#5aa9e6;
+  --shadow:0 1px 0 rgba(255,255,255,.02),0 8px 24px rgba(0,0,0,.35);
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#eef1f5; --panel:#ffffff; --panel-2:#f4f7fa; --line:#d5dde5;
+    --text:#14222f; --muted:#566673; --faint:#8a99a6;
+    --accent:#0c7c8f; --accent-soft:rgba(12,124,143,.12);
+    --rf:#b06a00; --rf-soft:rgba(176,106,0,.12);
+    --green:#1e8e4e; --red:#c0392b; --blue:#2f6fb0;
+    --shadow:0 1px 2px rgba(20,34,47,.06),0 8px 24px rgba(20,34,47,.08);
+  }
+}
+:root[data-theme="light"]{
+  --bg:#eef1f5; --panel:#ffffff; --panel-2:#f4f7fa; --line:#d5dde5;
+  --text:#14222f; --muted:#566673; --faint:#8a99a6;
+  --accent:#0c7c8f; --accent-soft:rgba(12,124,143,.12);
+  --rf:#b06a00; --rf-soft:rgba(176,106,0,.12);
+  --green:#1e8e4e; --red:#c0392b; --blue:#2f6fb0;
+  --shadow:0 1px 2px rgba(20,34,47,.06),0 8px 24px rgba(20,34,47,.08);
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font:400 16px/1.6 "IBM Plex Sans",system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+/* ---- Top bar ---- */
+.bar{
+  position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:16px;
+  padding:11px 20px;background:color-mix(in srgb,var(--bg) 82%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--line);
+}
+.bar .brand{font-family:"IBM Plex Mono",monospace;font-weight:600;letter-spacing:.5px;font-size:15px;white-space:nowrap}
+.bar .brand b{color:var(--accent)}
+.bar .tag{color:var(--muted);font-size:12px;font-family:"IBM Plex Mono",monospace;border-left:1px solid var(--line);padding-left:16px}
+.bar nav{margin-left:auto;display:flex;gap:2px;flex-wrap:wrap}
+.bar nav a{color:var(--muted);text-decoration:none;font-size:13px;padding:5px 9px;border-radius:6px}
+.bar nav a:hover{color:var(--text);background:var(--accent-soft)}
+.tbtn{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:7px;
+  width:34px;height:30px;cursor:pointer;font-size:14px;display:grid;place-items:center}
+.tbtn:hover{color:var(--text);border-color:var(--accent)}
+a:focus-visible,.tbtn:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+
+.wrap{max-width:940px;margin:0 auto;padding:0 20px 88px}
+
+/* ---- Hero ---- */
+.hero{padding:52px 0 30px;border-bottom:1px solid var(--line)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:2.5px;text-transform:uppercase;color:var(--accent);margin:0 0 14px}
+.hero h1{font-size:clamp(30px,5.2vw,46px);line-height:1.05;margin:0 0 16px;font-weight:700;letter-spacing:-.5px;text-wrap:balance}
+.hero p{font-size:18px;color:var(--muted);max-width:60ch;margin:0}
+.facts{display:flex;flex-wrap:wrap;gap:10px;margin-top:26px}
+.fact{display:flex;flex-direction:column;gap:2px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:9px}
+.fact .k{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
+.fact .v{font-weight:600;font-size:14px}
+
+/* ---- Sections ---- */
+section{padding:44px 0;border-bottom:1px solid var(--line)}
+section:last-of-type{border-bottom:0}
+.sec-h{display:flex;align-items:baseline;gap:14px;margin:0 0 6px}
+.sec-h .num{font-family:"IBM Plex Mono",monospace;color:var(--accent);font-size:14px;font-weight:600}
+h2{font-size:26px;margin:0;font-weight:700;letter-spacing:-.3px;text-wrap:balance}
+.sec-sub{color:var(--muted);margin:0 0 24px;max-width:65ch}
+h3{font-size:16px;margin:26px 0 10px;font-weight:600;letter-spacing:.2px}
+p{max-width:70ch}
+a{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+a:hover{border-bottom-color:currentColor}
+
+/* ---- Cards / grid ---- */
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(2,1fr)}
+.g3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:720px){.g2,.g3{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--shadow)}
+.card h4{margin:0 0 4px;font-size:15px}
+.card p{margin:0;color:var(--muted);font-size:14px}
+.card .price{font-family:"IBM Plex Mono",monospace;color:var(--accent);font-size:13px;float:right}
+
+/* ---- Chips ---- */
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:14px 0}
+.chip{font-family:"IBM Plex Mono",monospace;font-size:12px;padding:3px 10px;border-radius:20px;background:var(--panel-2);border:1px solid var(--line);color:var(--muted)}
+.chip b{color:var(--text);font-weight:600}
+.pin{color:var(--accent)}
+
+/* ---- Tables ---- */
+.tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;margin:8px 0 4px}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:520px}
+caption{caption-side:top;text-align:left;font-family:"IBM Plex Mono",monospace;font-size:12px;
+  letter-spacing:1px;text-transform:uppercase;color:var(--faint);padding:12px 16px 0}
+th,td{padding:10px 16px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);font-weight:500;background:var(--panel-2)}
+tbody tr:last-child td{border-bottom:0}
+td.mono,.num-col{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+td .sig{color:var(--accent);font-weight:600}
+tr.pwr td .sig{color:var(--rf)}
+
+/* ---- Callouts ---- */
+.note{display:flex;gap:12px;padding:14px 16px;border-radius:11px;margin:16px 0;border:1px solid var(--line);background:var(--panel)}
+.note .ic{font-family:"IBM Plex Mono",monospace;font-weight:600;flex:none;width:20px;text-align:center}
+.note p{margin:0;font-size:14px;color:var(--muted);max-width:none}
+.note.warn{border-color:color-mix(in srgb,var(--rf) 55%,var(--line));background:var(--rf-soft)}
+.note.warn .ic{color:var(--rf)}
+.note.stop{border-color:color-mix(in srgb,var(--red) 55%,var(--line));background:color-mix(in srgb,var(--red) 10%,transparent)}
+.note.stop .ic{color:var(--red)}
+.note.info .ic{color:var(--accent)}
+.note b{color:var(--text)}
+
+/* ---- Code (fixed terminal look, both themes) ---- */
+.code{background:#0c1117;border:1px solid #1d2732;border-radius:11px;padding:14px 16px;margin:12px 0;
+  overflow-x:auto;font-family:"IBM Plex Mono",monospace;font-size:13px;line-height:1.7;color:#cdd9e3}
+.code .c{color:#5f7285}       /* comment */
+.code .p{color:#4dd0e1}       /* prompt / accent */
+.code .s{color:#f5a623}       /* string / value */
+.code .k{color:#8fd39a}       /* keyword */
+
+/* ---- Steps ---- */
+.steps{display:grid;gap:14px;margin-top:8px}
+.step{display:grid;grid-template-columns:40px 1fr;gap:16px;align-items:start}
+.step .n{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:15px;color:var(--accent);
+  border:1px solid var(--line);border-radius:9px;height:40px;display:grid;place-items:center;background:var(--panel)}
+.step .b h3{margin:6px 0 6px}
+.step .b p{margin:0 0 8px;color:var(--muted);font-size:14.5px}
+
+/* ---- Diagram ---- */
+figure{margin:8px 0 6px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 18px 10px;box-shadow:var(--shadow)}
+figure svg{display:block;max-width:100%;height:auto}
+figcaption{color:var(--muted);font-size:13px;margin-top:10px;text-align:center}
+.d-box{fill:var(--panel-2);stroke:var(--line);stroke-width:1.5}
+.d-title{fill:var(--text);font:600 15px "IBM Plex Sans",sans-serif}
+.d-sub{fill:var(--muted);font:11px "IBM Plex Mono",monospace}
+.d-pin{fill:var(--muted);font:11px "IBM Plex Mono",monospace}
+.d-sig{fill:var(--text);font:11px "IBM Plex Mono",monospace}
+.w-uart{stroke:var(--accent);stroke-width:2;fill:none}
+.w-spi{stroke:var(--accent);stroke-width:2;fill:none}
+.w-pwr{stroke:var(--rf);stroke-width:2;fill:none;stroke-dasharray:5 4}
+.d-band{fill:var(--accent);font:600 11px "IBM Plex Mono",monospace}
+.d-band-rf{fill:var(--rf);font:600 11px "IBM Plex Mono",monospace}
+
+footer{color:var(--muted);font-size:13px;padding:28px 0 0;text-align:center}
+footer .mono{color:var(--faint);font-size:12px}
+.kbd{font-family:"IBM Plex Mono",monospace;font-size:.85em;background:var(--panel-2);border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+ul.tight{margin:6px 0;padding-left:20px}
+ul.tight li{margin:4px 0;color:var(--muted);font-size:14.5px}
+ul.tight li b{color:var(--text)}
+</style>
+
+<div class="bar">
+  <span class="brand">M5<b>MONSTER</b>C5</span>
+  <span class="tag">setup guide</span>
+  <nav>
+    <a href="#overview">Overview</a>
+    <a href="#parts">Parts</a>
+    <a href="#wiring">Wiring</a>
+    <a href="#flash">Flash</a>
+    <a href="#use">Use</a>
+    <a href="#tune">Tuning</a>
+    <a href="#trouble">Fixes</a>
+  </nav>
+  <button class="tbtn" id="themeBtn" aria-label="Toggle light/dark theme" title="Toggle theme">◐</button>
+</div>
+
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">ESP32-C5 · JanOS · CC1101</p>
+    <h1>M5MonsterC5 Setup Guide</h1>
+    <p>Build the dual-band Wi-Fi + sub-GHz add-on for the M5Stack Tab5 — wire the ESP32-C5 and a CC1101 radio, flash both halves of the firmware, and confirm it live. Works with the store-bought M5MonsterC5 board or a DIY ESP32-C5 dev board.</p>
+    <div class="facts">
+      <div class="fact"><span class="k">Radio host</span><span class="v">ESP32-C5 · Wi-Fi 6 dual-band</span></div>
+      <div class="fact"><span class="k">Sub-GHz</span><span class="v">CC1101 (300–928 MHz OOK)</span></div>
+      <div class="fact"><span class="k">UI host</span><span class="v">M5Stack Tab5 · ESP32-P4</span></div>
+      <div class="fact"><span class="k">Link</span><span class="v">UART · 115200 8N1</span></div>
+    </div>
+  </header>
+
+  <!-- OVERVIEW -->
+  <section id="overview">
+    <div class="sec-h"><span class="num">01</span><h2>How the stack fits together</h2></div>
+    <p class="sec-sub">Three parts, one wire harness. The Tab5 is only a screen and keyboard; every radio operation runs on the ESP32-C5 (firmware: <span class="mono">JanOS</span>), and the CC1101 gives that C5 its sub-GHz teeth. They talk over a plain serial link.</p>
+
+    <figure>
+      <svg viewBox="0 0 900 300" role="img" aria-label="M5Stack Tab5 connects to the ESP32-C5 over a Grove UART link at 115200 baud; the ESP32-C5 connects to the CC1101 over the SPI2 bus that it shares with the SD card.">
+        <!-- boxes -->
+        <rect class="d-box" x="24"  y="70" width="210" height="150" rx="12"/>
+        <rect class="d-box" x="345" y="70" width="210" height="150" rx="12"/>
+        <rect class="d-box" x="666" y="70" width="210" height="150" rx="12"/>
+        <!-- titles -->
+        <text class="d-title" x="129" y="104" text-anchor="middle">M5Stack Tab5</text>
+        <text class="d-sub"   x="129" y="124" text-anchor="middle">ESP32-P4 · UI</text>
+        <text class="d-title" x="450" y="104" text-anchor="middle">ESP32-C5</text>
+        <text class="d-sub"   x="450" y="124" text-anchor="middle">JanOS firmware</text>
+        <text class="d-title" x="771" y="104" text-anchor="middle">CC1101</text>
+        <text class="d-sub"   x="771" y="124" text-anchor="middle">sub-GHz radio</text>
+        <!-- roles -->
+        <text class="d-sub" x="129" y="176" text-anchor="middle">screen · touch</text>
+        <text class="d-sub" x="129" y="194" text-anchor="middle">keyboard</text>
+        <text class="d-sub" x="450" y="176" text-anchor="middle">Wi-Fi 2.4/5 GHz</text>
+        <text class="d-sub" x="450" y="194" text-anchor="middle">SD · GPS · CC1101</text>
+        <text class="d-sub" x="771" y="176" text-anchor="middle">OOK / ASK TX+RX</text>
+        <text class="d-sub" x="771" y="194" text-anchor="middle">433 / 315 / 868 / 915</text>
+
+        <!-- UART link Tab5 <-> C5 -->
+        <line class="w-uart" x1="234" y1="130" x2="345" y2="130"/>
+        <polygon points="345,130 335,125 335,135" fill="var(--accent)"/>
+        <polygon points="234,150 244,145 244,155" fill="var(--accent)"/>
+        <line class="w-uart" x1="234" y1="150" x2="345" y2="150"/>
+        <text class="d-band" x="289" y="112" text-anchor="middle">Grove UART</text>
+        <text class="d-pin"  x="289" y="172" text-anchor="middle">115200 · text</text>
+
+        <!-- SPI link C5 <-> CC1101 -->
+        <line class="w-spi" x1="555" y1="140" x2="666" y2="140"/>
+        <polygon points="666,140 656,135 656,145" fill="var(--accent)"/>
+        <polygon points="555,140 565,135 565,145" fill="var(--accent)"/>
+        <text class="d-band" x="610" y="122" text-anchor="middle">SPI2</text>
+        <text class="d-pin"  x="610" y="182" text-anchor="middle">shared w/ SD</text>
+
+        <!-- power rail note -->
+        <line class="w-pwr" x1="129" y1="248" x2="771" y2="248"/>
+        <text class="d-band-rf" x="450" y="240" text-anchor="middle">power &amp; ground rail</text>
+      </svg>
+      <figcaption>The Tab5 sends text commands (<span class="mono">subghz_rx</span>, <span class="mono">wifi_scan</span>…) over UART and renders the log lines the C5 prints back. Radio work never leaves the C5.</figcaption>
+    </figure>
+
+    <div class="note info"><span class="ic">i</span><p><b>Buy or build?</b> The $75 M5MonsterC5 board is the ESP32-C5 pre-mounted with the Grove/M5Bus connectors, an SD slot and a GPS port — plug-and-play. A DIY <b>ESP32-C5-DevKitC-1</b> (~$15) does the same electrically; you add the CC1101 and (optionally) a microSD breakout with a few jumpers. This guide covers both — the wiring below is identical, the store board just pre-makes the Tab5 connection.</p></div>
+  </section>
+
+  <!-- PARTS -->
+  <section id="parts">
+    <div class="sec-h"><span class="num">02</span><h2>What you need</h2></div>
+    <p class="sec-sub">Minimum is an ESP32-C5 and the Tab5. Add the CC1101 for sub-GHz, an SD card for capture storage and captive portals, and GPS for wardriving.</p>
+    <div class="grid g2">
+      <div class="card"><span class="price">required</span><h4>ESP32-C5 board</h4><p>M5MonsterC5, or an ESP32-C5-DevKitC-1. Must be the C5 — it is the only ESP32 with 2.4 <em>and</em> 5 GHz Wi-Fi.</p></div>
+      <div class="card"><span class="price">required</span><h4>M5Stack Tab5</h4><p>ESP32-P4 tablet. Runs the M5MonsterC5-Tab5 UI app.</p></div>
+      <div class="card"><span class="price">sub-GHz</span><h4>CC1101 module</h4><p>Any 3.3 V CC1101 breakout (E07-M1101D and clones). Needs SCK/MOSI/MISO/CSN/GDO0 broken out.</p></div>
+      <div class="card"><span class="price">storage</span><h4>microSD + breakout</h4><p>On the store board it's built in. For DIY, a 3.3 V SPI microSD breakout on the shared bus.</p></div>
+      <div class="card"><span class="price">optional</span><h4>GPS module</h4><p>ATGM336H (9600) or M5Stack GPS v1.1 (115200) for wardrive location.</p></div>
+      <div class="card"><span class="price">glue</span><h4>Jumpers + Grove cable</h4><p>Dupont wires for the CC1101, and one Grove cable for the Tab5 link (DIY route).</p></div>
+    </div>
+  </section>
+
+  <!-- WIRING -->
+  <section id="wiring">
+    <div class="sec-h"><span class="num">03</span><h2>Wiring</h2></div>
+    <p class="sec-sub">Two harnesses: a 4-wire UART from the Tab5 to the C5, and the CC1101 on the C5's SPI2 bus (the same bus the SD card uses — each device just gets its own chip-select). All logic is 3.3 V.</p>
+
+    <figure>
+      <svg viewBox="0 0 900 470" role="img" aria-label="Detailed pin harness. Tab5 Grove TX GPIO53 to C5 RX GPIO12, Tab5 RX GPIO54 to C5 TX GPIO11, grounds common, 5 volts to the C5. CC1101 shares C5 SPI2: SCK GPIO6, MOSI GPIO7, MISO GPIO2, plus CS GPIO23, GDO0 GPIO24, GDO2 GPIO5, and 3.3 volts and ground.">
+        <!-- Tab5 -->
+        <rect class="d-box" x="24" y="40" width="150" height="360" rx="12"/>
+        <text class="d-title" x="99" y="68" text-anchor="middle">Tab5</text>
+        <text class="d-sub" x="99" y="86" text-anchor="middle">Grove port</text>
+        <!-- C5 -->
+        <rect class="d-box" x="375" y="40" width="150" height="360" rx="12"/>
+        <text class="d-title" x="450" y="68" text-anchor="middle">ESP32-C5</text>
+        <text class="d-sub" x="450" y="86" text-anchor="middle">JanOS</text>
+        <!-- CC1101 -->
+        <rect class="d-box" x="726" y="150" width="150" height="250" rx="12"/>
+        <text class="d-title" x="801" y="178" text-anchor="middle">CC1101</text>
+
+        <!-- Tab5 <-> C5 UART harness (4 rows) -->
+        <!-- row y positions -->
+        <!-- TX->RX -->
+        <text class="d-pin" x="166" y="128" text-anchor="end">G53 TX</text>
+        <line class="w-uart" x1="174" y1="124" x2="375" y2="124"/>
+        <polygon points="375,124 364,119 364,129" fill="var(--accent)"/>
+        <text class="d-pin" x="383" y="128" text-anchor="start">G12 RX</text>
+        <!-- RX<-TX -->
+        <text class="d-pin" x="166" y="160" text-anchor="end">G54 RX</text>
+        <line class="w-uart" x1="174" y1="156" x2="375" y2="156"/>
+        <polygon points="174,156 185,151 185,161" fill="var(--accent)"/>
+        <text class="d-pin" x="383" y="160" text-anchor="start">G11 TX</text>
+        <!-- GND -->
+        <text class="d-pin" x="166" y="192" text-anchor="end">GND</text>
+        <line class="w-uart" x1="174" y1="188" x2="375" y2="188" stroke="var(--muted)"/>
+        <text class="d-pin" x="383" y="192" text-anchor="start">GND</text>
+        <!-- 5V -->
+        <text class="d-pin" x="166" y="224" text-anchor="end">5V</text>
+        <line class="w-pwr" x1="174" y1="220" x2="375" y2="220"/>
+        <polygon points="375,220 364,215 364,225" fill="var(--rf)"/>
+        <text class="d-pin" x="383" y="224" text-anchor="start">5V in</text>
+        <text class="d-band" x="274" y="108" text-anchor="middle">UART · cross TX/RX</text>
+
+        <!-- C5 <-> CC1101 SPI harness -->
+        <!-- SCK -->
+        <text class="d-pin" x="517" y="212" text-anchor="end">G6</text>
+        <line class="w-spi" x1="525" y1="208" x2="726" y2="208"/>
+        <text class="d-sig" x="734" y="212" text-anchor="start">SCK</text>
+        <!-- MOSI -->
+        <text class="d-pin" x="517" y="240" text-anchor="end">G7</text>
+        <line class="w-spi" x1="525" y1="236" x2="726" y2="236"/>
+        <polygon points="726,236 715,231 715,241" fill="var(--accent)"/>
+        <text class="d-sig" x="734" y="240" text-anchor="start">MOSI</text>
+        <!-- MISO -->
+        <text class="d-pin" x="517" y="268" text-anchor="end">G2</text>
+        <line class="w-spi" x1="525" y1="264" x2="726" y2="264"/>
+        <polygon points="525,264 536,259 536,269" fill="var(--accent)"/>
+        <text class="d-sig" x="734" y="268" text-anchor="start">MISO</text>
+        <!-- CS -->
+        <text class="d-pin" x="517" y="296" text-anchor="end">G23</text>
+        <line class="w-spi" x1="525" y1="292" x2="726" y2="292"/>
+        <text class="d-sig" x="734" y="296" text-anchor="start">CSN</text>
+        <!-- GDO0 -->
+        <text class="d-pin" x="517" y="324" text-anchor="end">G24</text>
+        <line class="w-spi" x1="525" y1="320" x2="726" y2="320"/>
+        <text class="d-sig" x="734" y="324" text-anchor="start">GDO0</text>
+        <!-- GDO2 -->
+        <text class="d-pin" x="517" y="352" text-anchor="end">G5</text>
+        <line class="w-spi" x1="525" y1="348" x2="726" y2="348" stroke-dasharray="4 3"/>
+        <text class="d-sig" x="734" y="352" text-anchor="start">GDO2 (opt)</text>
+        <!-- power -->
+        <text class="d-pin" x="517" y="380" text-anchor="end">3V3</text>
+        <line class="w-pwr" x1="525" y1="376" x2="726" y2="376"/>
+        <text class="d-sig" x="734" y="380" text-anchor="start" style="fill:var(--rf)">3V3 · GND</text>
+        <text class="d-band" x="625" y="196" text-anchor="middle">SPI2 (shared w/ SD)</text>
+      </svg>
+      <figcaption>Solid cyan = signal, dashed amber = power. On the store board the left harness is the Grove connector; on a dev board it is four jumpers. GDO2 is unused by the firmware today.</figcaption>
+    </figure>
+
+    <h3>Tab5 → ESP32-C5 (the UART link)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <caption>Grove UART · cross TX↔RX · 115200 8N1</caption>
+        <thead><tr><th>Signal</th><th>Tab5 (Grove)</th><th>ESP32-C5 (UART0)</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><span class="sig">TX → RX</span></td><td class="mono">GPIO53</td><td class="mono">GPIO12</td><td>Tab5 transmit into C5 receive</td></tr>
+          <tr><td><span class="sig">RX ← TX</span></td><td class="mono">GPIO54</td><td class="mono">GPIO11</td><td>C5 console output to Tab5</td></tr>
+          <tr><td><span class="sig">GND</span></td><td class="mono">GND</td><td class="mono">GND</td><td>common ground — required</td></tr>
+          <tr class="pwr"><td><span class="sig">5V</span></td><td class="mono">5V</td><td class="mono">5V in</td><td>or power the C5 from its own USB</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="mono" style="font-size:13px;color:var(--muted)">Prefer the M5Bus port? Use Tab5 <span class="pin">GPIO37</span> (TX) / <span class="pin">GPIO38</span> (RX) instead — the app auto-detects the C5 on whichever port answers.</p>
+
+    <h3>ESP32-C5 → CC1101 (SPI2, shared with the SD card)</h3>
+    <div class="tbl-wrap">
+      <table>
+        <caption>SPI mode 0 · ≤6.5 MHz · 3.3 V</caption>
+        <thead><tr><th>CC1101</th><th>ESP32-C5</th><th>Role</th></tr></thead>
+        <tbody>
+          <tr><td><span class="sig">SCK</span></td><td class="mono">GPIO6</td><td>SPI clock (shared bus)</td></tr>
+          <tr><td><span class="sig">MOSI / SI</span></td><td class="mono">GPIO7</td><td>host → radio (shared bus)</td></tr>
+          <tr><td><span class="sig">MISO / SO</span></td><td class="mono">GPIO2</td><td>radio → host (shared bus)</td></tr>
+          <tr><td><span class="sig">CSN</span></td><td class="mono">GPIO23</td><td>dedicated chip-select</td></tr>
+          <tr><td><span class="sig">GDO0</span></td><td class="mono">GPIO24</td><td>OOK data I/O — capture &amp; replay</td></tr>
+          <tr><td><span class="sig">GDO2</span></td><td class="mono">GPIO5</td><td>optional (unused in firmware)</td></tr>
+          <tr class="pwr"><td><span class="sig">VCC</span></td><td class="mono">3V3</td><td>3.3 V only — never 5 V</td></tr>
+          <tr class="pwr"><td><span class="sig">GND</span></td><td class="mono">GND</td><td>common ground</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Change these defaults, if you must, in <span class="mono">components/cc1101/include/cc1101.h</span> (<span class="mono">CC1101_PIN_CS / GDO0 / GDO2</span>).</p>
+
+    <div class="note stop"><span class="ic">✕</span><p><b>Do not use these pins for the CC1101.</b> <span class="mono">GPIO15–22</span> are the C5's in-package flash + Quad-PSRAM bus (touching them bricks the boot). <span class="mono">GPIO3/4</span> belong to the nRF24 driver. <span class="mono">GPIO11/12</span> are the console UART the Tab5 depends on. Strapping pins <span class="mono">2 · 7 · 27 · 28</span> are already committed. GPIO 5/23/24 were chosen precisely because they dodge all of these.</p></div>
+
+    <details class="card" style="margin-top:16px">
+      <summary style="cursor:pointer;font-weight:600">Optional: microSD &amp; GPS pins</summary>
+      <div class="tbl-wrap" style="margin-top:12px">
+        <table>
+          <thead><tr><th>Peripheral</th><th>Signal → C5 pin</th></tr></thead>
+          <tbody>
+            <tr><td>microSD (SPI2)</td><td class="mono">MISO G2 · MOSI G7 · CLK G6 · CS G10</td></tr>
+            <tr><td>GPS (UART1)</td><td class="mono">TX G13 · RX G14</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:10px">SD shares the same three SPI2 lines as the CC1101 with its own CS (GPIO10) — both live on the bus at once. GPS is its own UART.</p>
+    </details>
+  </section>
+
+  <!-- FLASH -->
+  <section id="flash">
+    <div class="sec-h"><span class="num">04</span><h2>Flash the firmware</h2></div>
+    <p class="sec-sub">Two independent images: <b>JanOS</b> on the ESP32-C5 and the <b>M5MonsterC5-Tab5</b> app on the Tab5. Do the C5 first so it's ready when the Tab5 comes up. The web flashers need Chrome/Edge (WebSerial).</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="n">1</div>
+        <div class="b">
+          <h3>Flash JanOS onto the ESP32-C5</h3>
+          <p>Easiest — the web flasher. Plug the C5 into USB, open the flasher, pick the port, flash.</p>
+          <div class="code"><span class="c"># web flasher (Chrome/Edge)</span>
+<span class="p">→</span> https://c5lab.github.io/projectZero/janos_flash.html</div>
+          <p>Or build this SubGHz-enabled tree from source with ESP-IDF v5.4.x and flash over USB:</p>
+          <div class="code"><span class="c"># from JanOS/ESP32C5</span>
+<span class="p">$</span> . <span class="s">$IDF_PATH</span>/export.sh
+<span class="p">$</span> idf.py set-target esp32c5      <span class="c"># already set</span>
+<span class="p">$</span> idf.py build
+<span class="p">$</span> idf.py <span class="k">-p</span> /dev/ttyACM0 flash monitor</div>
+          <p>Raw esptool offsets, if you prefer them (from the build output):</p>
+          <div class="code"><span class="p">$</span> python -m esptool <span class="k">--chip</span> esp32c5 <span class="k">-b</span> 460800 write_flash \
+    <span class="k">--flash_mode</span> dio <span class="k">--flash_size</span> 8MB <span class="k">--flash_freq</span> 80m \
+    <span class="s">0x2000</span> build/bootloader/bootloader.bin \
+    <span class="s">0x8000</span> build/partition_table/partition-table.bin \
+    <span class="s">0xf000</span> build/ota_data_initial.bin \
+    <span class="s">0x20000</span> build/projectZero.bin</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="n">2</div>
+        <div class="b">
+          <h3>Flash the app onto the Tab5</h3>
+          <p>Same idea on the ESP32-P4 side.</p>
+          <div class="code"><span class="c"># web flasher (Chrome/Edge)</span>
+<span class="p">→</span> https://c5lab.github.io/M5MonsterC5-Tab5/janos_flash.html</div>
+          <p>Or with esptool (ESP32-P4): bootloader <span class="mono">0x2000</span>, partition-table <span class="mono">0x8000</span>, app <span class="mono">0x10000</span>.</p>
+          <div class="code"><span class="p">$</span> python -m esptool <span class="k">--chip</span> esp32p4 <span class="k">-b</span> 460800 write_flash \
+    <span class="s">0x2000</span> bootloader.bin \
+    <span class="s">0x8000</span> partition-table.bin \
+    <span class="s">0x10000</span> M5MonsterC5-Tab5.bin</div>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="n">3</div>
+        <div class="b">
+          <h3>Power up together</h3>
+          <p>With the harness connected, boot the Tab5. It probes the Grove/M5Bus port, finds the C5, and reads its firmware version.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="note warn"><span class="ic">!</span><p><b>Version lock.</b> The Tab5 app requires JanOS <b>1.7.1</b> exactly (<span class="mono">JANOS_VERSION_REQUIRED</span>). A mismatch shows a "firmware too old/wrong" popup and disables features. The tree in this repo already reports <span class="mono">1.7.1</span> — if you flashed an older release, update JanOS.</p></div>
+  </section>
+
+  <!-- USE -->
+  <section id="use">
+    <div class="sec-h"><span class="num">05</span><h2>Verify &amp; use the sub-GHz suite</h2></div>
+    <p class="sec-sub">Open the SubGHz tab on the Tab5. The first radio action asks the C5 to init the CC1101; the radio badge turns to <span style="color:var(--green);font-weight:600">OK</span> on success (or <span style="color:var(--red);font-weight:600">NONE</span> if the CC1101 isn't answering).</p>
+
+    <div class="chips">
+      <span class="chip">badge <b class="pin">CC1101 initialized</b></span>
+      <span class="chip">or <b style="color:var(--red)">CC1101 NOT DETECTED</b></span>
+    </div>
+
+    <p>Every screen maps to a console command the C5 now implements. Quick smoke test: open <b>Listen</b> at 433.92 MHz and press a cheap remote near the antenna — a captured signal row should appear.</p>
+
+    <div class="tbl-wrap">
+      <table>
+        <caption>Tab5 screen → C5 command</caption>
+        <thead><tr><th>Screen</th><th>Command</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>Listen</td><td class="mono">subghz_rx [raw] rssi=</td><td>Receive + decode (or raw), live RSSI</td></tr>
+          <tr><td>Manage</td><td class="mono">subghz_list / tx / save / rename / delete</td><td>Stored signals on SD (Flipper <span class="mono">.sub</span>)</td></tr>
+          <tr><td>Jammer</td><td class="mono">subghz_jam</td><td>Continuous carrier on the current freq</td></tr>
+          <tr><td>Tesla</td><td class="mono">subghz_tx tesla</td><td>Charge-port opener burst</td></tr>
+          <tr><td>Hunter</td><td class="mono">subghz_freq_analyzer … hunt</td><td>Find a live freq, auto-capture</td></tr>
+          <tr><td>Scanner</td><td class="mono">subghz_scanner dwell= edges=</td><td>Sweep ISM bands for activity</td></tr>
+          <tr><td>Weather</td><td class="mono">subghz_weather</td><td>Decode weather-sensor telemetry</td></tr>
+          <tr><td>RF Settings</td><td class="mono">subghz_get/set_freq_correction</td><td>Crystal offset, saved in NVS</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- TUNE -->
+  <section id="tune">
+    <div class="sec-h"><span class="num">06</span><h2>Bench-tuning &amp; coverage</h2></div>
+    <p class="sec-sub">The firmware compiles clean and speaks the protocol exactly, but the RF constants ship as sensible defaults — they were not tuned against a live radio. Budget one bench session.</p>
+    <ul class="tight">
+      <li><b>RF timing constants</b> — RX bandwidth, data rate, glitch/idle thresholds and the TX inter-frame gap live in <span class="mono">cc1101.c</span> / <span class="mono">subghz_capture.c</span>. Adjust against a known remote.</li>
+      <li><b>Decoders</b> — Princeton / PT2262 / EV1527 fixed-code remotes decode to serial + button. Anything else is captured as <b>Unknown</b> but still saves and replays (Flipper RAW-style).</li>
+      <li><b>Weather</b> — the Nexus-TH family decodes; the framework in <span class="mono">subghz_decode.c</span> is built to add Acurite / LaCrosse / etc.</li>
+      <li><b>Rolling codes</b> — KeeLoq and friends cannot be cloned; they're reported, not replayed.</li>
+    </ul>
+    <div class="note warn"><span class="ic">!</span><p><b>Transmit responsibly.</b> Jammer and replay actively transmit. Know your local rules, use only on hardware you own, and keep power low on the bench.</p></div>
+  </section>
+
+  <!-- TROUBLE -->
+  <section id="trouble">
+    <div class="sec-h"><span class="num">07</span><h2>If something's off</h2></div>
+    <div class="tbl-wrap">
+      <table>
+        <caption>Symptom → check</caption>
+        <thead><tr><th>Symptom</th><th>Likely cause / fix</th></tr></thead>
+        <tbody>
+          <tr><td>Tab5 shows no board</td><td>TX/RX not crossed, or wrong port. Swap GPIO53↔54 mapping; try the M5Bus tab; confirm common GND.</td></tr>
+          <tr><td>"firmware too old/wrong" popup</td><td>C5 isn't JanOS 1.7.1 — reflash the C5.</td></tr>
+          <tr><td>Radio badge = NONE</td><td>CC1101 not answering: check 3V3 (not 5V), CSN=G23, MISO/MOSI/SCK, and that GPIO15–22 were avoided.</td></tr>
+          <tr><td>Nothing captured in Listen</td><td>Antenna missing, wrong band, or RSSI floor too high. Set the floor to −85 and press a remote up close.</td></tr>
+          <tr><td>Replayed signal ignored by device</td><td>RF timing needs a bench-tuning pass; verify the capture's edge count looks sane in Manage.</td></tr>
+          <tr><td>SD features greyed out</td><td>No SD on the C5, or wrong SPI pins (MISO2/MOSI7/CLK6/CS10).</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p>M5MonsterC5 · ESP32-C5 JanOS + CC1101 sub-GHz · M5Stack Tab5</p>
+    <p class="mono">Driver &amp; feature layer: components/cc1101 · components/subghz — see docs/subghz_cc1101.md</p>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var root=document.documentElement, btn=document.getElementById('themeBtn');
+  function cur(){
+    var t=null; try{t=localStorage.getItem('m5m-theme');}catch(e){}
+    if(t) return t;
+    return matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
+  }
+  function apply(t){ root.setAttribute('data-theme',t); btn.textContent = t==='light'?'☀':'☾'; }
+  apply(cur());
+  btn.addEventListener('click',function(){
+    var next = root.getAttribute('data-theme')==='light'?'dark':'light';
+    apply(next);
+    try{localStorage.setItem('m5m-theme',next);}catch(e){}
+  });
+})();
+</script>

@@ -32,6 +32,7 @@
 #include "esp_mac.h"
 
 #include "esp_console.h"
+#include "subghz.h"
 #include "argtable3/argtable3.h"
 
 #include "driver/uart.h"
@@ -22073,6 +22074,9 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&init_nrf24_cmd));
+
+    /* SubGHz (CC1101) command surface for the M5MonsterC5-Tab5 app */
+    subghz_register_commands();
 
     const esp_console_cmd_t start_jammer24_cmd = {
         .command = "start_jammer24",
