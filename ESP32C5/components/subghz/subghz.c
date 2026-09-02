@@ -31,6 +31,7 @@ float    g_subghz_freq = SUBGHZ_DEFAULT_FREQ;
 float    g_subghz_correction = 0.0f;
 
 static bool s_radio_init_attempted = false;
+static bool s_enabled = true;   /* radio arbiter: false => yield the shared header to the nRF24 */
 
 #define NVS_NS   "subghz"
 #define NVS_CORR "corr"   /* i32 hundredths of MHz */
@@ -67,6 +68,14 @@ static void radio_rx_ook(float mhz) {
 }
 
 bool subghz_ensure_radio(void) {
+    if (!s_enabled) {
+        /* The arbiter handed the shared SPI2 CS=GPIO3 / GDO0=GPIO4 header to the
+         * nRF24 jammer. Do not touch the bus or GPIO4; report the CC1101 absent
+         * so subghz_status prints radio=none. */
+        s_radio_init_attempted = true;
+        g_subghz_radio_ok = false;
+        return false;
+    }
     if (!s_radio_init_attempted) {
         cc1101_default_config(&g_subghz_radio);
         g_subghz_radio.mhz = subghz_effective_freq();
@@ -79,6 +88,25 @@ bool subghz_ensure_radio(void) {
     else                   printf("CC1101 NOT DETECTED\n");
     fflush(stdout);
     return g_subghz_radio_ok;
+}
+
+void subghz_set_enabled(bool enabled) {
+    s_enabled = enabled;
+    if (!enabled) {
+        /* Forget any prior CC1101 bring-up so a later re-enable re-probes
+         * cleanly. cc1101_init() removes its SPI device on absence. */
+        s_radio_init_attempted = false;
+        g_subghz_radio_ok = false;
+    }
+}
+
+bool subghz_detect(void) {
+    if (!s_enabled) return false;
+    /* Force a fresh probe: cc1101_init() adds an SPI2 device on CS=GPIO3, reads
+     * VERSION, and (if absent) removes the device again, leaving GPIO4 a plain
+     * input -- safe for the nRF24 backend to take over. */
+    s_radio_init_attempted = false;
+    return subghz_ensure_radio();
 }
 
 /* Stop any running op and wait for its task to exit. Safe to call from a

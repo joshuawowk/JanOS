@@ -6,11 +6,20 @@
  * (SD owns the bus; this attaches as a second device with its own CS), exactly
  * like the nRF24 driver in this project.
  *
- * Default wiring (all configurable below): CC1101 shares the SD SPI2 bus
+ * Default wiring: the CC1101 shares ONE swappable radio header with the nRF24
+ * jammer on the SD SPI2 bus, so a CC1101 (sub-GHz) or an nRF24 (2.4 GHz) can be
+ * socketed interchangeably -- one at a time -- and firmware auto-detects which is
+ * present. The CC1101 CS/GDO0 now sit on the exact pins the nRF24 uses for
+ * CSN/CE, and the (unused) GDO2 is dropped:
  *   SCK=GPIO6  MOSI=GPIO7  MISO=GPIO2   (already the SD bus)
- *   CS =GPIO23 GDO0=GPIO24 GDO2=GPIO5   (free, non-MSPI, non-strapping pins)
- * GPIO15-22 are the in-package flash/Quad-PSRAM (MSPI) bus on ESP32-C5 -- never
- * use them. GPIO3/4 are the nRF24 CS/CE. GPIO11/12 are the console UART.
+ *   CS =GPIO3  GDO0=GPIO4               (== nRF24 CSN/CE -- the shared header)
+ *   GDO2 disabled (-1)                  (was GPIO5; never used by firmware)
+ * Boot-safe: GPIO3 is a strapping pin but its only strap role is an unused SDIO
+ * clock-edge bit; GPIO4/MTCK is not a strapping pin (boot mode = GPIO26/27/28).
+ * The shared header needs a 10k external pull-up on GPIO3 (no internal pull on
+ * MTMS/MTDI) and a 4.7k external pull-down on GPIO4 (to beat its ~45k internal
+ * weak pull-up). GPIO15-22 are the in-package flash/PSRAM (MSPI) bus -- never
+ * use them. GPIO11/12 are the console UART.
  */
 #pragma once
 
@@ -34,13 +43,13 @@ extern "C" {
 #define CC1101_PIN_MOSI  7
 #endif
 #ifndef CC1101_PIN_CS
-#define CC1101_PIN_CS    23
+#define CC1101_PIN_CS    3     /* shared with nRF24 CSN (swappable radio header) */
 #endif
 #ifndef CC1101_PIN_GDO0
-#define CC1101_PIN_GDO0  24
+#define CC1101_PIN_GDO0  4     /* shared with nRF24 CE  (swappable radio header) */
 #endif
 #ifndef CC1101_PIN_GDO2
-#define CC1101_PIN_GDO2  5     /* optional; set <0 to disable */
+#define CC1101_PIN_GDO2  (-1)  /* dropped: unused by firmware, frees GPIO5 */
 #endif
 #ifndef CC1101_SPI_HOST
 #define CC1101_SPI_HOST  SPI2_HOST

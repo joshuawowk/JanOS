@@ -21356,8 +21356,66 @@ static int cmd_scan_airtag(int argc, char **argv)
 // ============================================================================
 
 // --- nRF24 jammer commands ---
+/* ---- Swappable radio arbiter (shared CC1101 / nRF24 header) -----------------
+ * A CC1101 (sub-GHz) and an nRF24 (2.4 GHz jammer) share ONE socket on SPI2:
+ * SCK=GPIO6 MOSI=GPIO7 MISO=GPIO2, CS/CSN=GPIO3, GDO0/CE=GPIO4. Only one module
+ * may be plugged at a time. We auto-detect which is present at boot and let only
+ * that backend own GPIO3/GPIO4, so the Tab5's two independent probes -
+ * subghz_status (CC1101) and init_nrf24 (jammer) - each report correctly and the
+ * right tiles light up. Swap the module with power off, then reboot to re-detect. */
+typedef enum { RADIO_UNKNOWN = 0, RADIO_CC1101, RADIO_NRF24, RADIO_NONE } radio_type_t;
+static radio_type_t s_active_radio = RADIO_UNKNOWN;
+static volatile bool s_radio_detected = false;   /* radio_detect() has completed */
+
+static const char *radio_type_name(radio_type_t r) {
+    switch (r) {
+        case RADIO_CC1101: return "cc1101";
+        case RADIO_NRF24:  return "nrf24";
+        case RADIO_NONE:   return "none";
+        default:           return "unknown";
+    }
+}
+
+/* Probe the shared header and pick the active backend. CC1101 first: its probe
+ * cleanly removes its SPI device and leaves GPIO4 an input when absent, so the
+ * nRF24 can then take the pins. Run once at boot from a clean state. */
+static void radio_detect(void) {
+    if (s_radio_detected) return;   /* run exactly once (boot, or first probe) */
+    /* MTCK/GPIO4 has an internal ~45k weak pull-up after reset; clear it so a
+     * bare nRF24 CE reads low (the external 4.7k pull-down does the rest). */
+    gpio_set_pull_mode(GPIO_NUM_4, GPIO_FLOATING);
+
+    subghz_set_enabled(true);
+    if (subghz_detect()) {
+        s_active_radio = RADIO_CC1101;
+    } else {
+        /* No CC1101 -> hand the shared pins to the nRF24 and probe it. */
+        subghz_set_enabled(false);
+        s_active_radio = nrf24_jammer_init() ? RADIO_NRF24 : RADIO_NONE;
+    }
+    s_radio_detected = true;
+    printf("[RADIO] active=%s (shared header CS=3 GDO0/CE=4)\n",
+           radio_type_name(s_active_radio));
+    fflush(stdout);
+}
+
+static int cmd_radio(int argc, char **argv) {
+    (void)argc; (void)argv;
+    printf("[RADIO_STATUS] active=%s\n", radio_type_name(s_active_radio));
+    fflush(stdout);
+    return 0;
+}
+
 static int cmd_init_nrf24(int argc, char **argv) {
     (void)argc; (void)argv;
+    if (!s_radio_detected) radio_detect();   /* in case the Tab5 probes before boot detect */
+    if (s_active_radio == RADIO_CC1101) {
+        /* CC1101 owns the shared header; do NOT init the nRF24 (it would seize
+         * GPIO4). Report absent so the Tab5 keeps the Jammer tile hidden. */
+        printf("[NRF24] not detected - CC1101 is active on the shared radio header\n");
+        oled_display_update_full("> NRF24", "  CC1101 active", "  (swap radio)", "  > Idle");
+        return 0;
+    }
     bool ok = nrf24_jammer_init();
     if (ok) {
         printf("[NRF24] detected (init OK) - SCK=6 MOSI=7 MISO=2 CS=3 CE=4\n");
@@ -22075,6 +22133,15 @@ static void register_commands(void)
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&init_nrf24_cmd));
 
+    const esp_console_cmd_t radio_cmd = {
+        .command = "radio",
+        .help = "Show the active radio on the shared CC1101/nRF24 header",
+        .hint = NULL,
+        .func = &cmd_radio,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&radio_cmd));
+
     /* SubGHz (CC1101) command surface for the M5MonsterC5-Tab5 app */
     subghz_register_commands();
 
@@ -22634,6 +22701,11 @@ void app_main(void) {
         whitelistedBssidsCount = 0;
     }
     vTaskDelay(pdMS_TO_TICKS(500));
+
+    /* Auto-detect which radio is plugged into the shared CC1101/nRF24 header and
+     * hand GPIO3/GPIO4 to that backend only (SD on SPI2 is already mounted). */
+    radio_detect();
+
     MY_LOG_INFO(TAG,"BOARD READY");
     oled_display_update_full("> JanOS v" JANOS_VERSION,
                             sd_init_ret == ESP_OK ? "  SD: OK" : "  SD: MISSING!",

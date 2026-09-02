@@ -22,6 +22,17 @@ void subghz_register_commands(void);
 /* Optional: probe the CC1101 once at boot (safe to skip; commands lazy-init). */
 void subghz_early_init(void);
 
+/* Radio arbitration for the shared CC1101/nRF24 header. Only one radio may own
+ * SPI2 CS=GPIO3 / GDO0=CE=GPIO4 at a time. When disabled, subghz_ensure_radio()
+ * reports the CC1101 absent WITHOUT touching SPI or GPIO4, so the nRF24 backend
+ * can own the shared pins. */
+void subghz_set_enabled(bool enabled);
+
+/* Fresh probe for a CC1101 on the shared header (reads its VERSION register and
+ * removes the SPI device again if absent). Returns true if a CC1101 answered.
+ * Used by the boot-time radio auto-detect. */
+bool subghz_detect(void);
+
 #ifdef __cplusplus
 }
 #endif
