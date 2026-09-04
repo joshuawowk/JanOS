@@ -62,6 +62,10 @@ static void radio_rx_ook(float mhz) {
     cc1101_set_idle(&g_subghz_radio);
     cc1101_set_modulation(&g_subghz_radio, CC1101_MOD_ASK);
     cc1101_set_ccmode(&g_subghz_radio, false);   /* async serial (raw) */
+    /* set_ccmode() writes MDMCFG4 with a hardcoded ~116 kHz RX bandwidth, which
+     * clobbers the wider config_base value. Restore 232 kHz so SAW-drifted 315/433
+     * remotes (often off by >100 kHz) still land inside the receive channel. */
+    cc1101_set_rxbw(&g_subghz_radio, 232.0f);
     radio_tune(mhz);
     cc1101_flush_rx(&g_subghz_radio);
     cc1101_set_rx(&g_subghz_radio);
