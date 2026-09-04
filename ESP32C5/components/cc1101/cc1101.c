@@ -83,7 +83,12 @@ void cc1101_read_burst(cc1101_t *dev, uint8_t addr, uint8_t *buf, uint8_t n) {
 uint8_t cc1101_version(cc1101_t *dev) { return cc1101_read_status(dev, CC1101_VERSION); }
 bool cc1101_present(cc1101_t *dev) {
     uint8_t v = cc1101_version(dev);
-    return (v != 0x00 && v != 0xFF);
+    /* Validate against real CC110x VERSION values instead of just "not 0/0xFF".
+     * The lenient check false-positived when an nRF24 shares the SPI bus: a
+     * VERSION read then returns the nRF24's STATUS byte (~0x0E), which wrongly
+     * claimed the shared header for CC1101 and blocked the nRF24 backend from
+     * ever probing. 0x14 = CC1101, 0x04 = CC1100, 0x17 = common clone revision. */
+    return (v == 0x14 || v == 0x04 || v == 0x17);
 }
 
 /* ---- Frequency + calibration ---- */
