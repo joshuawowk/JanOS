@@ -146,7 +146,15 @@ typedef struct {
     uint8_t modulation; /* CC1101_MOD_* */
     int pa_dbm;         /* requested output power */
     uint8_t last_pa_band;
+    /* Bit-bang fallback for a MISO line too slow for hardware SPI (same RC-loaded
+     * shared net that forces the nRF24 into bit-bang). When set, cc1101_trx()
+     * bit-bangs the transfer with bb_settle_us around each edge. */
+    bool bb_mode;
+    int  bb_settle_us;
 } cc1101_t;
+
+/* Reconfigure the SPI pins as plain GPIO for the bit-bang fallback path. */
+void cc1101_bb_setup_pins(cc1101_t *dev);
 
 /* Fill a device struct with the compile-time default pin map. */
 void cc1101_default_config(cc1101_t *dev);

@@ -24,9 +24,53 @@ static long imap(long x, long in_min, long in_max, long out_min, long out_max) {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
+/* ---- Bit-bang fallback (SPI mode 0), for a MISO line too slow for HW SPI ---- */
+#define CC1101_BB_SHORT_US 3
+
+void cc1101_bb_setup_pins(cc1101_t *dev) {
+    gpio_reset_pin((gpio_num_t)dev->sck_pin);
+    gpio_set_direction((gpio_num_t)dev->sck_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)dev->sck_pin, 0);
+    gpio_reset_pin((gpio_num_t)dev->mosi_pin);
+    gpio_set_direction((gpio_num_t)dev->mosi_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)dev->mosi_pin, 0);
+    gpio_reset_pin((gpio_num_t)dev->cs_pin);
+    gpio_set_direction((gpio_num_t)dev->cs_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)dev->cs_pin, 1);
+    gpio_reset_pin((gpio_num_t)dev->miso_pin);
+    gpio_set_direction((gpio_num_t)dev->miso_pin, GPIO_MODE_INPUT);
+}
+
+static uint8_t cc1101_bb_byte(cc1101_t *dev, uint8_t out) {
+    int settle = dev->bb_settle_us > 0 ? dev->bb_settle_us : 500;
+    uint8_t in = 0;
+    for (int i = 7; i >= 0; i--) {
+        gpio_set_level((gpio_num_t)dev->mosi_pin, (out >> i) & 1);
+        esp_rom_delay_us(CC1101_BB_SHORT_US);
+        gpio_set_level((gpio_num_t)dev->sck_pin, 1);
+        esp_rom_delay_us(settle);
+        in = (uint8_t)((in << 1) | (gpio_get_level((gpio_num_t)dev->miso_pin) & 1));
+        gpio_set_level((gpio_num_t)dev->sck_pin, 0);
+        esp_rom_delay_us(CC1101_BB_SHORT_US);
+    }
+    return in;
+}
+
 /* ---- SPI plumbing (mirrors nrf24.c: hardware CS, polling transfer) ---- */
 static void cc1101_trx(cc1101_t *dev, const uint8_t *tx, uint8_t *rx, size_t n) {
-    if (!dev || !dev->spi || n == 0) return;
+    if (!dev || n == 0) return;
+    if (dev->bb_mode) {
+        gpio_set_level((gpio_num_t)dev->cs_pin, 0);
+        esp_rom_delay_us(CC1101_BB_SHORT_US);
+        for (size_t i = 0; i < n; i++) {
+            uint8_t v = cc1101_bb_byte(dev, tx ? tx[i] : 0);
+            if (rx) rx[i] = v;
+        }
+        gpio_set_level((gpio_num_t)dev->cs_pin, 1);
+        esp_rom_delay_us(CC1101_BB_SHORT_US);
+        return;
+    }
+    if (!dev->spi) return;
     uint8_t local[65];
     if (n > sizeof(local)) n = sizeof(local);
     spi_transaction_t t = {
@@ -341,9 +385,25 @@ bool cc1101_init(cc1101_t *dev) {
     cc1101_strobe(dev, CC1101_SNOP);
 
     if (!cc1101_present(dev)) {
+        /* Hardware SPI couldn't read VERSION. The shared MISO net may be too slow
+         * for HW SPI (same RC-loaded line that forces the nRF24 into bit-bang).
+         * Drop the HW device, switch the pins to GPIO, and retry the probe
+         * bit-banged. If a CC1101 answers, keep bit-bang mode for operation. If
+         * not (e.g. an nRF24 is on the header), leave the pins as GPIO -- the
+         * nRF24 backend re-probes next and reconfigures them via its own path. */
         spi_bus_remove_device(dev->spi);
         dev->spi = NULL;
-        return false;
+        dev->bb_mode = true;
+        dev->bb_settle_us = 500;
+        cc1101_bb_setup_pins(dev);
+        cc1101_strobe(dev, CC1101_SRES);
+        esp_rom_delay_us(1000);
+        cc1101_strobe(dev, CC1101_SNOP);
+        if (!cc1101_present(dev)) {
+            dev->bb_mode = false;   /* absent; pins left as GPIO for the nRF24 probe */
+            return false;
+        }
+        /* CC1101 detected via bit-bang -- operate in bit-bang mode. */
     }
 
     dev->modulation = CC1101_MOD_ASK;
