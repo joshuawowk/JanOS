@@ -13,6 +13,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include "mbedtls/base64.h"
 
 static subghz_signal_t s_slots[SUBGHZ_MAX_SLOTS];
 static int s_next_idx = 1;
@@ -89,36 +90,75 @@ static void base_no_ext(const char *fname, char *out, size_t sz) {
 }
 
 /* Write a signal as Flipper SubGhz RAW .sub. */
+/* Stream an in-memory file to the host (Tab5), which writes it to its SD at
+ * /sdcard/<relpath>. This board has no SD of its own, so all storage is routed
+ * to the Tab5 -- mirrors the handshake [PCAPX] path with a generic [FILEX] frame:
+ *   [FILEX name=<relpath> size=<n>]  [FILED]<base64>...  [FILEX-END sum=<hex>] */
+static void subghz_stream_file(const char *relpath, const uint8_t *data, size_t len) {
+    printf("[FILEX name=%s size=%u]\n", relpath, (unsigned)len);
+    unsigned char b64[80];
+    uint32_t sum = 0;
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = (len - off > 48u) ? 48u : (len - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, data + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[FILED]%s\n", (char *)b64);
+        }
+        for (size_t i = 0; i < chunk; i++) sum += data[off + i];
+        off += chunk;
+    }
+    printf("[FILEX-END sum=%08lX]\n", (unsigned long)sum);
+    fflush(stdout);
+}
+
 int subghz_sd_save(const subghz_signal_t *sig, char *out_name, size_t out_sz) {
-    ensure_dirs();
     char base[48];
     if (sig->name[0]) snprintf(base, sizeof(base), "%s", sig->name);
     else              snprintf(base, sizeof(base), "subghz_%04d", sig->idx);
     /* sanitise base (no spaces/slashes) */
     for (char *p = base; *p; p++) if (*p == ' ' || *p == '/' || *p == '\\') *p = '_';
 
+    /* Build the Flipper .sub content in memory so it can be written to a local SD
+     * OR streamed to the host. ~8 chars per timing (max " -65535") + header. */
+    size_t cap = 256 + (size_t)sig->edges * 8u;
+    char *buf = malloc(cap);
+    if (!buf) return -1;
+    int n = 0;
+    long freq_hz = (long)(sig->freq * 1000000.0f + 0.5f);
+    n += snprintf(buf + n, cap - n, "Filetype: Flipper SubGhz RAW File\n");
+    n += snprintf(buf + n, cap - n, "Version: 1\n");
+    n += snprintf(buf + n, cap - n, "Frequency: %ld\n", freq_hz);
+    n += snprintf(buf + n, cap - n, "Preset: FuriHalSubGhzPresetOok650Async\n");
+    n += snprintf(buf + n, cap - n, "Protocol: RAW\n");
+    /* RAW_Data lines: +dur for HIGH, -dur for LOW, alternating from index 0. */
+    int per_line = 0;
+    for (int i = 0; i < sig->edges && n < (int)cap - 16; i++) {
+        if (per_line == 0) n += snprintf(buf + n, cap - n, "RAW_Data:");
+        int sign = (i % 2 == 0) ? 1 : -1;
+        n += snprintf(buf + n, cap - n, " %d", sign * (int)sig->timings[i]);
+        if (++per_line >= 40) { n += snprintf(buf + n, cap - n, "\n"); per_line = 0; }
+    }
+    if (per_line && n < (int)cap - 2) n += snprintf(buf + n, cap - n, "\n");
+    if (n > (int)cap) n = (int)cap;
+
+    /* Local SD first (a board that has one), else stream to the host (Tab5). */
+    ensure_dirs();
     char path[160];
     snprintf(path, sizeof(path), "%s/%s.sub", SUBGHZ_SUB_DIR, base);
     FILE *f = fopen(path, "w");
-    if (!f) return -1;
-    long freq_hz = (long)(sig->freq * 1000000.0f + 0.5f);
-    fprintf(f, "Filetype: Flipper SubGhz RAW File\n");
-    fprintf(f, "Version: 1\n");
-    fprintf(f, "Frequency: %ld\n", freq_hz);
-    fprintf(f, "Preset: FuriHalSubGhzPresetOok650Async\n");
-    fprintf(f, "Protocol: RAW\n");
-    /* RAW_Data lines: +dur for HIGH, -dur for LOW, alternating from index 0. */
-    int per_line = 0;
-    for (int i = 0; i < sig->edges; i++) {
-        if (per_line == 0) fprintf(f, "RAW_Data:");
-        int sign = (i % 2 == 0) ? 1 : -1;
-        fprintf(f, " %d", sign * (int)sig->timings[i]);
-        if (++per_line >= 40) { fprintf(f, "\n"); per_line = 0; }
+    if (f) {
+        fwrite(buf, 1, (size_t)n, f);
+        fclose(f);
+    } else {
+        char relpath[80];
+        snprintf(relpath, sizeof(relpath), "lab/subghz/%s.sub", base);
+        subghz_stream_file(relpath, (const uint8_t *)buf, (size_t)n);
     }
-    if (per_line) fprintf(f, "\n");
-    fclose(f);
+    free(buf);
     if (out_name) snprintf(out_name, out_sz, "%s.sub", base);
-    return 0;
+    return 0;   /* saved locally or streamed to the host */
 }
 
 /* Parse a .sub file into a signal (RAW_Data -> timings, Frequency -> freq). */
