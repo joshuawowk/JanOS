@@ -21427,6 +21427,49 @@ static int cmd_init_nrf24(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_spitest(int argc, char **argv) {
+    if (argc >= 2 && argv[1] != NULL && strcasecmp(argv[1], "int") == 0) {
+        nrf24_jammer_spi_selftest_internal();
+    } else {
+        nrf24_jammer_spi_selftest();
+    }
+    return 0;
+}
+
+/* Probe a radio-header pin as a plain GPIO: internal pull-up then pull-down.
+ * A healthy, un-driven net follows the pull (up=1, down=0). A net stuck at one
+ * level regardless of the pull is shorted or actively driven -- a real fault. */
+static void gpio_pull_probe(int pin, const char *label) {
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT);
+    gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLUP_ONLY);
+    esp_rom_delay_us(3000);
+    int up = gpio_get_level((gpio_num_t)pin);
+    gpio_set_pull_mode((gpio_num_t)pin, GPIO_PULLDOWN_ONLY);
+    esp_rom_delay_us(3000);
+    int down = gpio_get_level((gpio_num_t)pin);
+    gpio_set_pull_mode((gpio_num_t)pin, GPIO_FLOATING);
+    const char *verdict =
+        (up == 1 && down == 0) ? "follows pull (no strong external drive; nRF24 MISO is hi-Z when deselected)" :
+        (up == 0 && down == 0) ? "HELD LOW  (short to GND or actively driven low)" :
+        (up == 1 && down == 1) ? "HELD HIGH (short to 3V3 or actively driven high)" :
+                                 "inconsistent";
+    printf("[GPIOTEST] GPIO%-2d %-8s pull-up=%d pull-down=%d => %s\n", pin, label, up, down, verdict);
+}
+
+static int cmd_gpiotest(int argc, char **argv) {
+    (void)argc; (void)argv;
+    printf("[GPIOTEST] Probing shared radio-header pins as plain GPIO (SPI torn down -- reboot after).\n");
+    gpio_pull_probe(2, "MISO");
+    gpio_pull_probe(3, "CS");
+    gpio_pull_probe(4, "CE");
+    gpio_pull_probe(6, "SCK");
+    gpio_pull_probe(7, "MOSI");
+    printf("[GPIOTEST] Any 'HELD LOW/HIGH' on GPIO2/6/7 = a short/solder-bridge on that line (real fault to fix).\n");
+    fflush(stdout);
+    return 0;
+}
+
 static int cmd_start_jammer24(int argc, char **argv) {
     nrf24_jam_band_t band = JAM_ALL;
     if (argc >= 2 && argv[1] != NULL) {
@@ -22141,6 +22184,24 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&radio_cmd));
+
+    const esp_console_cmd_t spitest_cmd = {
+        .command = "spitest",
+        .help = "SPI self-test on radio header: 'spitest' (real MISO) or 'spitest int' (internal loopback, no jumper)",
+        .hint = NULL,
+        .func = &cmd_spitest,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&spitest_cmd));
+
+    const esp_console_cmd_t gpiotest_cmd = {
+        .command = "gpiotest",
+        .help = "Probe radio-header pins (2/3/4/6/7) as GPIO to find shorts (reboot after)",
+        .hint = NULL,
+        .func = &cmd_gpiotest,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&gpiotest_cmd));
 
     /* SubGHz (CC1101) command surface for the M5MonsterC5-Tab5 app */
     subghz_register_commands();
@@ -24626,6 +24687,18 @@ static esp_err_t init_sd_card(void) {
             MY_LOG_INFO(TAG, "SD: not detected (%s after %d/%d/%d kHz). File-backed features disabled.",
                         esp_err_to_name(ret), attempted_freqs[0], attempted_freqs[1], attempted_freqs[2]);
         }
+        /* Release SPI2 so the CC1101/nRF24 radio that shares this exact bus gets
+         * a clean bus to initialize on. A failed sdspi mount leaves the bus (and
+         * possibly its DMA channel / device slot) wedged, which starves the
+         * radio's transactions -- they clock out but read back all-zero MISO.
+         * Best-effort: unmount any partial handle, then free the bus. On SD
+         * SUCCESS we skip this and keep the bus for the card. */
+        if (sd_card_handle) {
+            esp_vfs_fat_sdcard_unmount(mount_point, sd_card_handle);
+            sd_card_handle = NULL;
+        }
+        esp_err_t free_ret = spi_bus_free(SPI2_HOST);
+        MY_LOG_INFO(TAG, "SD: released SPI2 for shared radio (spi_bus_free=%s)", esp_err_to_name(free_ret));
         return ret;
     }
     sd_last_init_error = ESP_OK;

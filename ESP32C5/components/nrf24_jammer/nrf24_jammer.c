@@ -2,12 +2,16 @@
 #include "nrf24.h"
 
 #include <string.h>
+#include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "esp_rom_gpio.h"
+#include "driver/gpio.h"
+#include "soc/spi_periph.h"
 
 #define TAG "nrf24_jammer"
 
@@ -38,6 +42,90 @@ static volatile bool s_jam_stop = true;
 static volatile bool s_jam_running = false;
 static nrf24_jam_band_t s_band = JAM_ALL;
 static TaskHandle_t s_jam_task = NULL;
+
+void nrf24_jammer_spi_selftest(void) {
+    if (!s_initialized) {
+        memset(&s_dev, 0, sizeof(s_dev));
+        s_dev.host = NRF24_SPI_HOST;
+        s_dev.sck_pin = NRF24_SCK_PIN;
+        s_dev.mosi_pin = NRF24_MOSI_PIN;
+        s_dev.miso_pin = NRF24_MISO_PIN;
+        s_dev.cs_pin = NRF24_CS_PIN;
+        s_dev.ce_pin = NRF24_CE_PIN;
+        s_dev.initialized = false;
+        if (!nrf24_init(&s_dev)) {
+            printf("[SPI-TEST] SPI device init failed\n");
+            return;
+        }
+        s_initialized = true;
+    }
+    uint8_t tx[4] = {0xA5, 0x3C, 0x0F, 0xF0};
+    uint8_t rx[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    nrf24_spi_trx(&s_dev, tx, rx, 4, 100);
+    printf("[SPI-TEST] tx=A5 3C 0F F0  rx=%02X %02X %02X %02X\n",
+           rx[0], rx[1], rx[2], rx[3]);
+    printf("[SPI-TEST]  With MOSI(GPIO7) jumpered to MISO(GPIO2), nRF24 unplugged:\n");
+    printf("[SPI-TEST]   rx == tx (A5 3C 0F F0) => C5 SPI + GPIO2 are OK; fault is the module or its MISO wire.\n");
+    printf("[SPI-TEST]   rx all 00 / all FF     => GPIO2 / SPI2 not working on the C5 (firmware/board issue).\n");
+    fflush(stdout);
+}
+
+static bool ensure_dev(void) {
+    if (!s_initialized) {
+        memset(&s_dev, 0, sizeof(s_dev));
+        s_dev.host = NRF24_SPI_HOST;
+        s_dev.sck_pin = NRF24_SCK_PIN;
+        s_dev.mosi_pin = NRF24_MOSI_PIN;
+        s_dev.miso_pin = NRF24_MISO_PIN;
+        s_dev.cs_pin = NRF24_CS_PIN;
+        s_dev.ce_pin = NRF24_CE_PIN;
+        s_dev.initialized = false;
+        if (!nrf24_init(&s_dev)) {
+            printf("[SPI-TEST] SPI device init failed\n");
+            return false;
+        }
+        s_initialized = true;
+    }
+    return true;
+}
+
+/* Spare GPIO the firmware never wires to anything (GDO2 was dropped, freeing
+ * GPIO5). Used purely as a scratch node for the internal loopback so the real
+ * SPI pins (and their IO_MUX config) are never disturbed. */
+#define NRF24_LOOPBACK_SCRATCH_PIN 5
+
+void nrf24_jammer_spi_selftest_internal(void) {
+    if (!ensure_dev()) return;
+    /* True internal loopback: fan the MOSI OUTPUT signal (spid_out) out to a
+     * spare GPIO, and route the MISO INPUT signal (spiq_in) to read that same
+     * spare GPIO. The shift register clocks its own tx bits back in, entirely
+     * inside the chip -- no jumper, no module, and none of the real SPI pins are
+     * touched. If this echoes the pattern, the SPI peripheral + shift path are
+     * provably healthy and the 0x00 on the real bus is downstream (GPIO2 net,
+     * SCK/MISO wiring, or the module itself). */
+    uint32_t spid_out = spi_periph_signal[NRF24_SPI_HOST].spid_out;
+    uint32_t spiq_in  = spi_periph_signal[NRF24_SPI_HOST].spiq_in;
+    int scratch = NRF24_LOOPBACK_SCRATCH_PIN;
+
+    gpio_reset_pin((gpio_num_t)scratch);
+    gpio_set_direction((gpio_num_t)scratch, GPIO_MODE_INPUT_OUTPUT);
+    esp_rom_gpio_connect_out_signal((uint32_t)scratch, spid_out, false, false); /* MOSI out -> scratch */
+    esp_rom_gpio_connect_in_signal((uint32_t)scratch, spiq_in, false);          /* scratch  -> MISO in */
+
+    uint8_t tx[4] = {0xA5, 0x3C, 0x0F, 0xF0};
+    uint8_t rx[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    nrf24_spi_trx(&s_dev, tx, rx, 4, 100);
+
+    /* Restore MISO input to the real MISO pin (GPIO2). MOSI's real routing is
+     * left as-is (still driven on GPIO7); a reboot fully restores the scratch. */
+    esp_rom_gpio_connect_in_signal((uint32_t)NRF24_MISO_PIN, spiq_in, false);
+
+    printf("[SPI-INT] internal loopback via spare GPIO%d (real SPI pins untouched)  tx=A5 3C 0F F0  rx=%02X %02X %02X %02X\n",
+           scratch, rx[0], rx[1], rx[2], rx[3]);
+    printf("[SPI-INT]   rx == tx (A5 3C 0F F0) => SPI peripheral + shift path HEALTHY; 0x00 is downstream (module/MISO/SCK wiring).\n");
+    printf("[SPI-INT]   rx all 00               => SPI peripheral itself isn't shifting/clocking (firmware/board).\n");
+    fflush(stdout);
+}
 
 const char* nrf24_jammer_band_name(nrf24_jam_band_t band) {
     switch (band) {

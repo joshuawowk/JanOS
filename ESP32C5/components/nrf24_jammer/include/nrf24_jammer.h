@@ -31,6 +31,19 @@ bool nrf24_jammer_is_running(void);
 /* Human-readable band name, e.g. for log output. */
 const char* nrf24_jammer_band_name(nrf24_jam_band_t band);
 
+/* SPI bus loopback self-test. Sends a known 4-byte pattern full-duplex on the
+ * shared radio SPI device and prints what came back on MISO. With MOSI (GPIO7)
+ * jumpered directly to MISO (GPIO2) and the nRF24 unplugged, a healthy C5 SPI
+ * bus echoes the pattern back verbatim -- isolating a C5/GPIO2 fault from a
+ * module/wiring fault. */
+void nrf24_jammer_spi_selftest(void);
+
+/* Internal-loopback variant: reroutes the SPI MISO input to sample the MOSI pin
+ * via the GPIO matrix, so the peripheral reads back its own output with NO
+ * jumper and NO module. Confirms the SPI peripheral + MOSI path are healthy,
+ * isolating them from the GPIO2/MISO net. */
+void nrf24_jammer_spi_selftest_internal(void);
+
 #ifdef __cplusplus
 }
 #endif

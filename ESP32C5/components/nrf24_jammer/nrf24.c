@@ -305,9 +305,9 @@ bool nrf24_check_connected(nrf24_device_t* device) {
         uint8_t readback = 0xAB;
         nrf24_read_reg(device, REG_RF_CH, &readback, 1);
         if (readback != probes[i]) {
-            ESP_LOGW(TAG, "SPI read-back mismatch on RF_CH: wrote 0x%02X read 0x%02X "
-                          "(0x00 = no MISO / unpowered nRF24; 0xFF = MISO stuck / CS not asserting)",
-                     probes[i], readback);
+            printf("[NRF24-DBG] RF_CH wrote 0x%02X read 0x%02X "
+                   "(0x00=no MISO/unpowered; 0xFF=MISO stuck/CS not asserting)\n",
+                   probes[i], readback);
             return false;
         }
     }
