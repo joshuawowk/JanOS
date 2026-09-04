@@ -6,6 +6,8 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_rom_sys.h"
+#include "driver/gpio.h"
 
 #define TAG "nrf24"
 
@@ -82,6 +84,51 @@ void nrf24_deinit(nrf24_device_t* device) {
     device->initialized = false;
 }
 
+/* --- Bit-bang fallback (SPI mode 0) for a MISO line too slow for hardware SPI.
+ * A short delay clocks MOSI (a clean output pin); a long settle after the rising
+ * edge lets a slow/RC-loaded MISO reach a valid level before we sample it. --- */
+#define NRF24_BB_SHORT_US 3
+
+void nrf24_bb_setup_pins(nrf24_device_t* device) {
+    gpio_reset_pin(device->sck_pin);
+    gpio_set_direction(device->sck_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(device->sck_pin, 0);              /* CPOL=0: idle low */
+    gpio_reset_pin(device->mosi_pin);
+    gpio_set_direction(device->mosi_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(device->mosi_pin, 0);
+    gpio_reset_pin(device->cs_pin);
+    gpio_set_direction(device->cs_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(device->cs_pin, 1);               /* CS idle high */
+    gpio_reset_pin(device->miso_pin);
+    gpio_set_direction(device->miso_pin, GPIO_MODE_INPUT);
+}
+
+static uint8_t nrf24_bb_byte(nrf24_device_t* device, uint8_t out) {
+    int settle = device->bb_settle_us > 0 ? device->bb_settle_us : 500;
+    uint8_t in = 0;
+    for (int i = 7; i >= 0; i--) {
+        gpio_set_level(device->mosi_pin, (out >> i) & 1);
+        esp_rom_delay_us(NRF24_BB_SHORT_US);                 /* MOSI setup (clean pin) */
+        gpio_set_level(device->sck_pin, 1);                  /* rising edge */
+        esp_rom_delay_us(settle);                            /* let slow MISO settle */
+        in = (uint8_t)((in << 1) | (gpio_get_level(device->miso_pin) & 1));
+        gpio_set_level(device->sck_pin, 0);                  /* falling edge */
+        esp_rom_delay_us(NRF24_BB_SHORT_US);
+    }
+    return in;
+}
+
+static void nrf24_bb_trx(nrf24_device_t* device, uint8_t* tx, uint8_t* rx, uint8_t size) {
+    gpio_set_level(device->cs_pin, 0);
+    esp_rom_delay_us(NRF24_BB_SHORT_US);
+    for (uint8_t i = 0; i < size; i++) {
+        uint8_t in = nrf24_bb_byte(device, tx ? tx[i] : 0xFF);
+        if (rx) rx[i] = in;
+    }
+    gpio_set_level(device->cs_pin, 1);
+    esp_rom_delay_us(NRF24_BB_SHORT_US);
+}
+
 void nrf24_spi_trx(
     nrf24_device_t* device,
     uint8_t* tx,
@@ -89,7 +136,13 @@ void nrf24_spi_trx(
     uint8_t size,
     uint32_t timeout) {
     (void)timeout;
-    if (!device->initialized || device->spi == NULL || size == 0) return;
+    if (!device->initialized || size == 0) return;
+
+    if (device->bb_mode) {          /* slow-MISO fallback: bit-bang the pins */
+        nrf24_bb_trx(device, tx, rx, size);
+        return;
+    }
+    if (device->spi == NULL) return;
 
     uint8_t local_rx[33];
     bool use_local = (rx == NULL);
@@ -299,15 +352,21 @@ bool nrf24_check_connected(nrf24_device_t* device) {
 
     /* Write a couple of distinctive channel values and read them back. A
      * present, powered module echoes them; an absent one returns 0x00/0xFF. */
+    /* STATUS is returned on the FIRST byte of every SPI command, independently of
+     * any register data. A powered, wired module returns a non-zero STATUS (e.g.
+     * 0x0E after reset); 0x00 here means nothing is coming back on MISO at all. */
+    uint8_t status = nrf24_status(device);
+
     const uint8_t probes[] = {0x0A, 0x55, 0x2E};
     for (size_t i = 0; i < sizeof(probes); i++) {
         nrf24_write_reg(device, REG_RF_CH, probes[i]);
         uint8_t readback = 0xAB;
         nrf24_read_reg(device, REG_RF_CH, &readback, 1);
         if (readback != probes[i]) {
-            printf("[NRF24-DBG] RF_CH wrote 0x%02X read 0x%02X "
-                   "(0x00=no MISO/unpowered; 0xFF=MISO stuck/CS not asserting)\n",
-                   probes[i], readback);
+            printf("[NRF24-DBG] STATUS=0x%02X  RF_CH wrote 0x%02X read 0x%02X\n",
+                   status, probes[i], readback);
+            printf("[NRF24-DBG]   STATUS!=00 => module IS answering on MISO (look at MOSI/command path);\n");
+            printf("[NRF24-DBG]   STATUS==00 => nothing on MISO at all (dead module, or MISO/SCK/CS not reaching it).\n");
             return false;
         }
     }

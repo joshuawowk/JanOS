@@ -44,6 +44,24 @@ void nrf24_jammer_spi_selftest(void);
  * isolating them from the GPIO2/MISO net. */
 void nrf24_jammer_spi_selftest_internal(void);
 
+/* Real-pin loopback at 200 kHz instead of 2 MHz: distinguishes a GPIO2 pad
+ * that's too slow/RC-loaded for SPI speed (echoes slow, garbles fast) from a
+ * bad jumper contact (garbles at both). */
+void nrf24_jammer_spi_selftest_slow(int khz);
+
+/* Self-drive + read one real pad at 2 MHz to classify it clean vs RC-loaded --
+ * used to scan for a clean MISO/MOSI pin. Only pass safe, broken-out GPIOs. */
+void nrf24_jammer_pad_test(int pin);
+
+/* Re-probe the real nRF24 at a given SPI clock (kHz): full register round-trip +
+ * STATUS read, to find the rate the RC-loaded MISO line reads cleanly at. */
+void nrf24_jammer_probe_at_khz(int khz);
+
+/* Bit-banged nRF24 register round-trip with a settle delay (us) around each
+ * clock edge -- slow enough to read through a heavily capacitively loaded MISO
+ * line that hardware SPI (even at its min clock) can't. Tears down hardware SPI. */
+void nrf24_jammer_bitbang_probe(int settle_us);
+
 #ifdef __cplusplus
 }
 #endif

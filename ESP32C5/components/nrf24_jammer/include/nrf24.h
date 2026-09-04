@@ -70,12 +70,22 @@ typedef struct {
     gpio_num_t cs_pin;
     gpio_num_t ce_pin;
     bool initialized;
+    /* When the MISO line is too slow for hardware SPI (RC-loaded / weak module
+     * output), nrf24_spi_trx() falls back to a bit-banged transfer that waits
+     * bb_settle_us around each clock edge so MISO can settle before sampling.
+     * Writes still go out correctly; reads become slow but reliable. */
+    bool bb_mode;
+    int  bb_settle_us;
 } nrf24_device_t;
 
 /* Initialize the SPI device + CE pin. The SPI bus is initialized here if it is
  * not already owned by another driver (e.g. the SD card). Returns true on
  * success. */
 bool nrf24_init(nrf24_device_t* device);
+
+/* Reconfigure the SPI pins as plain GPIO for the bit-bang fallback path
+ * (used when bb_mode is enabled because hardware SPI can't read a slow MISO). */
+void nrf24_bb_setup_pins(nrf24_device_t* device);
 
 /* Remove the SPI device and release the CE pin. The shared SPI bus itself is
  * left intact (owned by the SD card driver). */

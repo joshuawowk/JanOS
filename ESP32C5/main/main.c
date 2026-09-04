@@ -196,8 +196,8 @@
 #define GPS_BAUD_M5STACK   115200
 
 // SD Card SPI pins (Marauder compatible)
-#define SD_MISO_PIN        2
-#define SD_MOSI_PIN        7  
+#define SD_MISO_PIN        5   /* moved off strapping GPIO2 (RC-loaded, SPI-slow) */
+#define SD_MOSI_PIN        8   /* moved off strapping GPIO7 (RC-loaded, SPI-slow) */
 #define SD_CLK_PIN         6
 #define SD_CS_PIN          10
 
@@ -21358,7 +21358,7 @@ static int cmd_scan_airtag(int argc, char **argv)
 // --- nRF24 jammer commands ---
 /* ---- Swappable radio arbiter (shared CC1101 / nRF24 header) -----------------
  * A CC1101 (sub-GHz) and an nRF24 (2.4 GHz jammer) share ONE socket on SPI2:
- * SCK=GPIO6 MOSI=GPIO7 MISO=GPIO2, CS/CSN=GPIO3, GDO0/CE=GPIO4. Only one module
+ * SCK=GPIO6 MOSI=GPIO8 MISO=GPIO5, CS/CSN=GPIO3, GDO0/CE=GPIO4. Only one module
  * may be plugged at a time. We auto-detect which is present at boot and let only
  * that backend own GPIO3/GPIO4, so the Tab5's two independent probes -
  * subghz_status (CC1101) and init_nrf24 (jammer) - each report correctly and the
@@ -21418,7 +21418,7 @@ static int cmd_init_nrf24(int argc, char **argv) {
     }
     bool ok = nrf24_jammer_init();
     if (ok) {
-        printf("[NRF24] detected (init OK) - SCK=6 MOSI=7 MISO=2 CS=3 CE=4\n");
+        printf("[NRF24] detected (init OK) - SCK=6 MOSI=8 MISO=5 CS=3 CE=4\n");
         oled_display_update_full("> NRF24", "  Module OK", "", "  > Ready");
     } else {
         printf("[NRF24] not detected - check wiring/power (3.3V + cap)\n");
@@ -21430,6 +21430,11 @@ static int cmd_init_nrf24(int argc, char **argv) {
 static int cmd_spitest(int argc, char **argv) {
     if (argc >= 2 && argv[1] != NULL && strcasecmp(argv[1], "int") == 0) {
         nrf24_jammer_spi_selftest_internal();
+    } else if (argc >= 2 && argv[1] != NULL && strcasecmp(argv[1], "slow") == 0) {
+        int khz = (argc >= 3 && argv[2] != NULL) ? atoi(argv[2]) : 200;
+        nrf24_jammer_spi_selftest_slow(khz);
+    } else if (argc >= 3 && argv[1] != NULL && strcasecmp(argv[1], "pad") == 0) {
+        nrf24_jammer_pad_test(atoi(argv[2]));
     } else {
         nrf24_jammer_spi_selftest();
     }
@@ -21457,15 +21462,27 @@ static void gpio_pull_probe(int pin, const char *label) {
     printf("[GPIOTEST] GPIO%-2d %-8s pull-up=%d pull-down=%d => %s\n", pin, label, up, down, verdict);
 }
 
+static int cmd_nrf24probe(int argc, char **argv) {
+    int khz = (argc >= 2 && argv[1] != NULL) ? atoi(argv[1]) : 1000;
+    nrf24_jammer_probe_at_khz(khz);
+    return 0;
+}
+
+static int cmd_nrf24bb(int argc, char **argv) {
+    int us = (argc >= 2 && argv[1] != NULL) ? atoi(argv[1]) : 500;
+    nrf24_jammer_bitbang_probe(us);
+    return 0;
+}
+
 static int cmd_gpiotest(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("[GPIOTEST] Probing shared radio-header pins as plain GPIO (SPI torn down -- reboot after).\n");
-    gpio_pull_probe(2, "MISO");
+    gpio_pull_probe(5, "MISO");
+    gpio_pull_probe(8, "MOSI");
+    gpio_pull_probe(6, "SCK");
     gpio_pull_probe(3, "CS");
     gpio_pull_probe(4, "CE");
-    gpio_pull_probe(6, "SCK");
-    gpio_pull_probe(7, "MOSI");
-    printf("[GPIOTEST] Any 'HELD LOW/HIGH' on GPIO2/6/7 = a short/solder-bridge on that line (real fault to fix).\n");
+    printf("[GPIOTEST] Any 'HELD LOW/HIGH' on GPIO5/8/6 = a short/solder-bridge on that line (real fault to fix).\n");
     fflush(stdout);
     return 0;
 }
@@ -22193,6 +22210,24 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&spitest_cmd));
+
+    const esp_console_cmd_t nrf24probe_cmd = {
+        .command = "nrf24probe",
+        .help = "Probe the nRF24 at a given SPI clock kHz: nrf24probe <khz>",
+        .hint = NULL,
+        .func = &cmd_nrf24probe,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nrf24probe_cmd));
+
+    const esp_console_cmd_t nrf24bb_cmd = {
+        .command = "nrf24bb",
+        .help = "Bit-bang nRF24 read with settle delay us/edge: nrf24bb <us>",
+        .hint = NULL,
+        .func = &cmd_nrf24bb,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nrf24bb_cmd));
 
     const esp_console_cmd_t gpiotest_cmd = {
         .command = "gpiotest",

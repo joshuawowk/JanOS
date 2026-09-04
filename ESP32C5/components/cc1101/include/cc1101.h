@@ -9,11 +9,16 @@
  * Default wiring: the CC1101 shares ONE swappable radio header with the nRF24
  * jammer on the SD SPI2 bus, so a CC1101 (sub-GHz) or an nRF24 (2.4 GHz) can be
  * socketed interchangeably -- one at a time -- and firmware auto-detects which is
- * present. The CC1101 CS/GDO0 now sit on the exact pins the nRF24 uses for
- * CSN/CE, and the (unused) GDO2 is dropped:
- *   SCK=GPIO6  MOSI=GPIO7  MISO=GPIO2   (already the SD bus)
+ * present. The CC1101 CS/GDO0 sit on the exact pins the nRF24 uses for CSN/CE,
+ * and the (unused) GDO2 is dropped:
+ *   SCK=GPIO6  MOSI=GPIO8  MISO=GPIO5   (the SD bus)
  *   CS =GPIO3  GDO0=GPIO4               (== nRF24 CSN/CE -- the shared header)
- *   GDO2 disabled (-1)                  (was GPIO5; never used by firmware)
+ *   GDO2 disabled (-1)                  (never used by firmware)
+ * MISO/MOSI were MOVED off GPIO2/GPIO7: both are ESP32-C5 strapping pins and the
+ * DevKitC-1 stabilizes their boot state with a cap, which RC-limits them to
+ * ~250 kHz SPI (measured) -- far below the 2 MHz the radios run at, so MISO on
+ * GPIO2 never clocked data in. GPIO5/GPIO8 are clean, non-strapping pads (both
+ * pass a 2 MHz self-drive loopback; run `spitest pad <n>` to re-verify).
  * Boot-safe: GPIO3 is a strapping pin but its only strap role is an unused SDIO
  * clock-edge bit; GPIO4/MTCK is not a strapping pin (boot mode = GPIO26/27/28).
  * The shared header needs a 10k external pull-up on GPIO3 (no internal pull on
@@ -37,10 +42,10 @@ extern "C" {
 #define CC1101_PIN_SCK   6
 #endif
 #ifndef CC1101_PIN_MISO
-#define CC1101_PIN_MISO  2
+#define CC1101_PIN_MISO  5     /* moved off strapping GPIO2 (RC-loaded, SPI-slow) */
 #endif
 #ifndef CC1101_PIN_MOSI
-#define CC1101_PIN_MOSI  7
+#define CC1101_PIN_MOSI  8     /* moved off strapping GPIO7 (RC-loaded, SPI-slow) */
 #endif
 #ifndef CC1101_PIN_CS
 #define CC1101_PIN_CS    3     /* shared with nRF24 CSN (swappable radio header) */

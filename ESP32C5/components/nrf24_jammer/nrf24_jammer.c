@@ -10,6 +10,7 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_rom_gpio.h"
+#include "esp_rom_sys.h"
 #include "driver/gpio.h"
 #include "soc/spi_periph.h"
 
@@ -19,10 +20,14 @@
  * own CS + CE. Change these if you wire the module differently. */
 #define NRF24_SPI_HOST   SPI2_HOST
 #define NRF24_SCK_PIN    6   /* shared with SD_CLK */
-#define NRF24_MOSI_PIN   7   /* shared with SD_MOSI */
-#define NRF24_MISO_PIN   2   /* shared with SD_MISO */
+#define NRF24_MOSI_PIN   8   /* shared with SD_MOSI (moved off strapping GPIO7) */
+#define NRF24_MISO_PIN   5   /* shared with SD_MISO (moved off strapping GPIO2) */
 #define NRF24_CS_PIN     3   /* dedicated chip-select (was CC1101 CS) */
 #define NRF24_CE_PIN     4   /* dedicated chip-enable (was CC1101 GDO0) */
+/* NOTE: GPIO2 (MTMS) and GPIO7 are ESP32-C5 strapping pins; the DevKitC-1 puts
+ * a boot-stabilizing cap on them, so they only pass clean SPI up to ~250 kHz.
+ * MISO/MOSI were moved to clean pins GPIO5/GPIO8 for full 2 MHz. Verified with
+ * the `spitest pad <n>` scanner: 2 & 7 = RC-loaded, 5/8/9/6/3/4 = clean. */
 
 /* PA max with the LNA bit set (RF_SETUP low nibble = 0b0111), matching the
  * Arduino RF24 setPALevel(RF24_PA_MAX, true). */
@@ -64,7 +69,7 @@ void nrf24_jammer_spi_selftest(void) {
     nrf24_spi_trx(&s_dev, tx, rx, 4, 100);
     printf("[SPI-TEST] tx=A5 3C 0F F0  rx=%02X %02X %02X %02X\n",
            rx[0], rx[1], rx[2], rx[3]);
-    printf("[SPI-TEST]  With MOSI(GPIO7) jumpered to MISO(GPIO2), nRF24 unplugged:\n");
+    printf("[SPI-TEST]  With MOSI(GPIO8) jumpered to MISO(GPIO5), nRF24 unplugged:\n");
     printf("[SPI-TEST]   rx == tx (A5 3C 0F F0) => C5 SPI + GPIO2 are OK; fault is the module or its MISO wire.\n");
     printf("[SPI-TEST]   rx all 00 / all FF     => GPIO2 / SPI2 not working on the C5 (firmware/board issue).\n");
     fflush(stdout);
@@ -92,7 +97,7 @@ static bool ensure_dev(void) {
 /* Spare GPIO the firmware never wires to anything (GDO2 was dropped, freeing
  * GPIO5). Used purely as a scratch node for the internal loopback so the real
  * SPI pins (and their IO_MUX config) are never disturbed. */
-#define NRF24_LOOPBACK_SCRATCH_PIN 5
+#define NRF24_LOOPBACK_SCRATCH_PIN 9   /* free clean pad; GPIO5 is now MISO */
 
 void nrf24_jammer_spi_selftest_internal(void) {
     if (!ensure_dev()) return;
@@ -127,6 +132,141 @@ void nrf24_jammer_spi_selftest_internal(void) {
     fflush(stdout);
 }
 
+void nrf24_jammer_spi_selftest_slow(int khz) {
+    if (!ensure_dev()) return;
+    if (khz <= 0) khz = 200;
+    /* Real-pin loopback (MOSI GPIO8 -> external jumper -> MISO GPIO5) at a
+     * caller-chosen clock. Sweeping the clock finds the fastest rate the RC-
+     * loaded GPIO2 pad can still read cleanly, so the production SPI clock can be
+     * set just below that knee (with margin) -- no rewiring needed. */
+    spi_device_interface_config_t cfg = {
+        .clock_speed_hz = khz * 1000,
+        .mode = 0,
+        .spics_io_num = -1,   /* CS irrelevant for a wire loopback */
+        .queue_size = 1,
+        .command_bits = 0,
+        .address_bits = 0,
+    };
+    spi_device_handle_t h = NULL;
+    esp_err_t r = spi_bus_add_device(NRF24_SPI_HOST, &cfg, &h);
+    if (r != ESP_OK) { printf("[SPI-SLOW] add_device failed: %s\n", esp_err_to_name(r)); return; }
+    uint8_t tx[4] = {0xA5, 0x3C, 0x0F, 0xF0};
+    uint8_t rx[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    spi_transaction_t t = { .length = 32, .rxlength = 32, .tx_buffer = tx, .rx_buffer = rx };
+    spi_device_polling_transmit(h, &t);
+    spi_bus_remove_device(h);
+    bool ok = (rx[0] == tx[0] && rx[1] == tx[1] && rx[2] == tx[2] && rx[3] == tx[3]);
+    printf("[SPI-SLOW] %5dkHz real-pin loopback (GPIO8->jumper->GPIO5)  rx=%02X %02X %02X %02X  %s\n",
+           khz, rx[0], rx[1], rx[2], rx[3], ok ? "OK (clean echo)" : "GARBLED");
+    fflush(stdout);
+}
+
+void nrf24_jammer_pad_test(int pin) {
+    if (!ensure_dev()) return;
+    /* Self-drive + read a single real pad at 2 MHz: route the MOSI output signal
+     * and the MISO input signal both to `pin`, so the SPI engine drives the pad
+     * and reads it back. A clean, unloaded pad echoes the pattern; an RC/capped
+     * pad (like the GPIO2 strapping pin) garbles. Lets us scan candidate pins for
+     * a clean MISO/MOSI home with no jumper and no rewiring. */
+    uint32_t spid_out = spi_periph_signal[NRF24_SPI_HOST].spid_out;
+    uint32_t spiq_in  = spi_periph_signal[NRF24_SPI_HOST].spiq_in;
+
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT_OUTPUT);
+    esp_rom_gpio_connect_out_signal((uint32_t)pin, spid_out, false, false);
+    esp_rom_gpio_connect_in_signal((uint32_t)pin, spiq_in, false);
+
+    uint8_t tx[4] = {0xA5, 0x3C, 0x0F, 0xF0};
+    uint8_t rx[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+    nrf24_spi_trx(&s_dev, tx, rx, 4, 100);
+
+    /* Detach the peripheral output from this pad, restore MISO input to GPIO2. */
+    gpio_reset_pin((gpio_num_t)pin);
+    gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT);
+    esp_rom_gpio_connect_in_signal((uint32_t)NRF24_MISO_PIN, spiq_in, false);
+
+    bool ok = (rx[0] == tx[0] && rx[1] == tx[1] && rx[2] == tx[2] && rx[3] == tx[3]);
+    printf("[PADTEST] GPIO%-2d self-drive+read @2MHz  rx=%02X %02X %02X %02X  %s\n",
+           pin, rx[0], rx[1], rx[2], rx[3], ok ? "CLEAN (fast pad, good for SPI)" : "loaded/garbled (RC pad)");
+    fflush(stdout);
+}
+
+void nrf24_jammer_probe_at_khz(int khz) {
+    if (!ensure_dev()) return;
+    if (khz <= 0) khz = 1000;
+    /* Re-add the nRF24 SPI device at a given clock and run a full register
+     * round-trip (write RF_CH, read it back) plus a STATUS read. Lets us sweep
+     * the clock live against the real module to find the rate the RC-loaded MISO
+     * line can actually deliver a clean multi-byte read at. */
+    if (s_dev.spi) { spi_bus_remove_device(s_dev.spi); s_dev.spi = NULL; }
+    spi_device_interface_config_t cfg = {
+        .clock_speed_hz = khz * 1000,
+        .mode = 0,
+        .spics_io_num = NRF24_CS_PIN,
+        .queue_size = 1,
+        .command_bits = 0,
+        .address_bits = 0,
+    };
+    if (spi_bus_add_device(NRF24_SPI_HOST, &cfg, &s_dev.spi) != ESP_OK) {
+        printf("[NRF24-PROBE] %dkHz add_device failed\n", khz);
+        return;
+    }
+    uint8_t status = nrf24_status(&s_dev);
+    uint8_t rb1 = 0xAB, rb2 = 0xAB;
+    nrf24_write_reg(&s_dev, REG_RF_CH, 0x0A);
+    nrf24_read_reg(&s_dev, REG_RF_CH, &rb1, 1);
+    nrf24_write_reg(&s_dev, REG_RF_CH, 0x55);
+    nrf24_read_reg(&s_dev, REG_RF_CH, &rb2, 1);
+    printf("[NRF24-PROBE] %4dkHz  STATUS=0x%02X  RF_CH wr0A->rd%02X  wr55->rd%02X  %s\n",
+           khz, status, rb1, rb2, (rb1 == 0x0A && rb2 == 0x55) ? "PASS" : "fail");
+    fflush(stdout);
+}
+
+/* Bit-banged SPI byte, mode 0 (CPOL0/CPHA0), with a settle delay around every
+ * edge so a cap-slowed MISO has time to reach a valid level before we sample. */
+static uint8_t bb_xfer(uint8_t out, int settle_us) {
+    uint8_t in = 0;
+    for (int i = 7; i >= 0; i--) {
+        gpio_set_level((gpio_num_t)NRF24_MOSI_PIN, (out >> i) & 1);
+        esp_rom_delay_us(settle_us);                 /* MOSI setup */
+        gpio_set_level((gpio_num_t)NRF24_SCK_PIN, 1); /* rising edge: data latched */
+        esp_rom_delay_us(settle_us);                 /* let MISO settle through the RC */
+        in = (uint8_t)((in << 1) | (gpio_get_level((gpio_num_t)NRF24_MISO_PIN) & 1));
+        gpio_set_level((gpio_num_t)NRF24_SCK_PIN, 0); /* falling edge */
+        esp_rom_delay_us(settle_us);
+    }
+    return in;
+}
+
+void nrf24_jammer_bitbang_probe(int settle_us) {
+    if (!ensure_dev()) return;
+    if (settle_us <= 0) settle_us = 500;
+    /* Release the hardware-SPI device and drive the pins as plain GPIO so we can
+     * clock slowly enough to beat the MISO-line capacitance. Reboot restores. */
+    if (s_dev.spi) { spi_bus_remove_device(s_dev.spi); s_dev.spi = NULL; }
+    gpio_reset_pin((gpio_num_t)NRF24_SCK_PIN);  gpio_set_direction((gpio_num_t)NRF24_SCK_PIN,  GPIO_MODE_OUTPUT); gpio_set_level((gpio_num_t)NRF24_SCK_PIN, 0);
+    gpio_reset_pin((gpio_num_t)NRF24_MOSI_PIN); gpio_set_direction((gpio_num_t)NRF24_MOSI_PIN, GPIO_MODE_OUTPUT); gpio_set_level((gpio_num_t)NRF24_MOSI_PIN, 0);
+    gpio_reset_pin((gpio_num_t)NRF24_CS_PIN);   gpio_set_direction((gpio_num_t)NRF24_CS_PIN,   GPIO_MODE_OUTPUT); gpio_set_level((gpio_num_t)NRF24_CS_PIN, 1);
+    gpio_reset_pin((gpio_num_t)NRF24_MISO_PIN); gpio_set_direction((gpio_num_t)NRF24_MISO_PIN, GPIO_MODE_INPUT);
+
+    /* Write RF_CH = 0x2E */
+    gpio_set_level((gpio_num_t)NRF24_CS_PIN, 0); esp_rom_delay_us(settle_us);
+    bb_xfer(W_REGISTER | (REGISTER_MASK & REG_RF_CH), settle_us);
+    bb_xfer(0x2E, settle_us);
+    gpio_set_level((gpio_num_t)NRF24_CS_PIN, 1); esp_rom_delay_us(settle_us);
+
+    /* Read RF_CH back (first byte returns STATUS, second the register value) */
+    gpio_set_level((gpio_num_t)NRF24_CS_PIN, 0); esp_rom_delay_us(settle_us);
+    uint8_t status = bb_xfer(R_REGISTER | (REGISTER_MASK & REG_RF_CH), settle_us);
+    uint8_t val    = bb_xfer(0xFF, settle_us);
+    gpio_set_level((gpio_num_t)NRF24_CS_PIN, 1);
+
+    printf("[NRF24-BB] settle=%dus/edge  STATUS=0x%02X  RF_CH wr2E->rd%02X  %s\n",
+           settle_us, status, val, (val == 0x2E) ? "PASS -- module reads cleanly (MISO cap workaround works)" : "fail");
+    printf("[NRF24-BB]   (SPI torn down for bit-bang; reboot to restore hardware SPI)\n");
+    fflush(stdout);
+}
+
 const char* nrf24_jammer_band_name(nrf24_jam_band_t band) {
     switch (band) {
         case JAM_BLE: return "ble";
@@ -157,9 +297,28 @@ bool nrf24_jammer_init(void) {
     }
 
     bool connected = nrf24_check_connected(&s_dev);
+    if (!connected && !s_dev.bb_mode) {
+        /* Hardware SPI couldn't read the module. If the MISO line is electrically
+         * slow (RC-loaded net or a weak module output driver), no hardware-SPI
+         * clock is slow enough -- but a bit-banged read that waits for MISO to
+         * settle can still reach the module. Tear down the HW SPI device, switch
+         * the pins to GPIO, and retry in bit-bang mode. Writes (channel hops)
+         * still work through the same path; reads just become slow. */
+        if (s_dev.spi) { spi_bus_remove_device(s_dev.spi); s_dev.spi = NULL; }
+        s_dev.bb_mode = true;
+        s_dev.bb_settle_us = 500;
+        nrf24_bb_setup_pins(&s_dev);
+        connected = nrf24_check_connected(&s_dev);
+        if (connected) {
+            ESP_LOGW(TAG, "nRF24 detected via BIT-BANG fallback (MISO line is slow; "
+                          "hardware SPI can't read it -- running bit-banged at %d us/edge)",
+                     s_dev.bb_settle_us);
+        }
+    }
     if (connected) {
-        ESP_LOGI(TAG, "nRF24 detected on SPI%d (CS=%d, CE=%d)",
-                 (int)NRF24_SPI_HOST, NRF24_CS_PIN, NRF24_CE_PIN);
+        ESP_LOGI(TAG, "nRF24 detected on SPI%d (CS=%d, CE=%d)%s",
+                 (int)NRF24_SPI_HOST, NRF24_CS_PIN, NRF24_CE_PIN,
+                 s_dev.bb_mode ? " [bit-bang]" : "");
     } else {
         ESP_LOGW(TAG, "nRF24 not responding (check wiring/power)");
     }
