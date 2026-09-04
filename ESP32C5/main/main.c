@@ -13874,7 +13874,15 @@ static int cmd_start_nmap(int argc, char **argv)
             MY_LOG_INFO(TAG, "NMAP: local IP " IPSTR " netmask " IPSTR,
                         IP2STR(&nmap_ip.ip), IP2STR(&nmap_ip.netmask));
         } else {
-            MY_LOG_INFO(TAG, "NMAP: WARNING no STA IP (DHCP pending / not connected) -- results may be empty");
+            /* No station IP -> not connected / DHCP not done. Abort BEFORE any
+             * socket call: connect() with no netif up asserts in LWIP
+             * (tcpip_send_msg_wait_sem "Invalid mbox") and crashes the C5. Emit
+             * the completion line the Tab5 waits on so its scan ends cleanly. */
+            MY_LOG_INFO(TAG, "NMAP: no STA IP -- connect to WiFi first (skipping scan)");
+            MY_LOG_INFO(TAG, "=== NMAP Scan Results ===");
+            MY_LOG_INFO(TAG, "Scanned 0 hosts, found 0 open ports");
+            oled_display_update_full("> NMAP", "  Not connected", "  Join WiFi first", "");
+            return 1;
         }
     }
 
