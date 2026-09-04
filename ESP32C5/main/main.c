@@ -3,6 +3,7 @@
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <sys/stat.h>
@@ -7234,6 +7235,79 @@ static void hs_stream_pcap_over_uart(const char *ssid_safe, const char *mac_suff
         off += chunk;
     }
     printf("[PCAPX-END sum=%08lX]\n", (unsigned long)sum);
+}
+
+/* ---- Generic storage reroute -----------------------------------------------
+ * This board has no SD, so files are streamed to the host (Tab5), which stores
+ * them under /sdcard/<relpath>. Two host-side frames:
+ *   whole file : [FILEX name=<relpath> size=<n>] [FILED]<b64>.. [FILEX-END sum=<hex>]
+ *   append     : [FILEA name=<relpath>]<b64>   (one line per <=48B chunk, ordered)
+ * host_save_file()/host_append_file() write to a local SD if one is mounted, and
+ * fall back to streaming otherwise -- so the same call works with or without an
+ * SD on the board. */
+static void host_stream_file(const char *relpath, const uint8_t *data, size_t len) {
+    printf("[FILEX name=%s size=%u]\n", relpath, (unsigned)len);
+    unsigned char b64[80];
+    uint32_t sum = 0;
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = (len - off > 48u) ? 48u : (len - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, data + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[FILED]%s\n", (char *)b64);
+        }
+        for (size_t i = 0; i < chunk; i++) sum += data[off + i];
+        off += chunk;
+    }
+    printf("[FILEX-END sum=%08lX]\n", (unsigned long)sum);
+    fflush(stdout);
+}
+
+/* Write a whole file: local SD if mounted, else stream to the host (Tab5). */
+static bool host_save_file(const char *relpath, const void *data, size_t len) {
+    char path[200];
+    snprintf(path, sizeof(path), "/sdcard/%s", relpath);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(data, 1, len, f); fclose(f); return true; }
+    host_stream_file(relpath, (const uint8_t *)data, len);
+    return true;
+}
+
+/* Append bytes to a file: local SD if mounted, else stream append frames. */
+static bool host_append_file(const char *relpath, const void *data, size_t len) {
+    char path[200];
+    snprintf(path, sizeof(path), "/sdcard/%s", relpath);
+    FILE *f = fopen(path, "a");
+    if (f) { fwrite(data, 1, len, f); fclose(f); return true; }
+    const uint8_t *p = (const uint8_t *)data;
+    unsigned char b64[80];
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = (len - off > 48u) ? 48u : (len - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, p + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[FILEA name=%s]%s\n", relpath, (char *)b64);
+        }
+        off += chunk;
+    }
+    fflush(stdout);
+    return true;
+}
+
+/* Append a printf-formatted chunk into a fixed buffer, tracking the offset and
+ * clamping on overflow. Used to build a whole log line in RAM before handing it to
+ * host_append_file() (which either writes a local SD or streams append frames). */
+static void host_bufcat(char *buf, size_t cap, size_t *off, const char *fmt, ...) {
+    if (!buf || cap == 0 || *off >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, cap - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    *off += (size_t)n;
+    if (*off >= cap) *off = cap - 1;   /* truncated: keep offset in-bounds */
 }
 
 static bool hs_save_handshake_to_sd(int ap_idx) {
@@ -18698,16 +18772,11 @@ static void darksword_save_loot(const char *json_body, size_t json_len) {
         return;
     }
 
-    FILE *f = fopen(filepath, "wb");
-    if (!f) {
-        MY_LOG_INFO(TAG, "DS loot: cannot write %s", filepath);
-        free(decoded);
-        cJSON_Delete(root);
-        return;
-    }
-    fwrite(decoded, 1, olen, f);
-    fflush(f);
-    fclose(f);
+    // Write the whole decoded blob: local SD if one is mounted, else stream it to the
+    // host (Tab5), which stores it under /sdcard/<relpath>. filepath always begins with
+    // "/sdcard/"; host_save_file() takes the path relative to /sdcard.
+    const char *loot_rel = filepath + strlen("/sdcard/");
+    host_save_file(loot_rel, decoded, olen);
     sd_sync();
 
     MY_LOG_INFO(TAG, "DS loot: saved %s (%u bytes) [%s]", filepath, (unsigned)olen, category);
@@ -25261,21 +25330,13 @@ static int find_next_pcap_file_number(void) {
 
 // Save evil twin password to SD card
 static void save_evil_twin_password(const char* ssid, const char* password) {
-    // Initialize SD card if not already mounted
-    esp_err_t ret = init_sd_card();
-    if (ret != ESP_OK) {
-        MY_LOG_INFO(TAG, "Failed to initialize SD card for password logging: %s", esp_err_to_name(ret));
-        return;
-    }
-    
-    // Check if /sdcard directory is accessible
-    struct stat st;
-    if (stat("/sdcard", &st) != 0) {
-        MY_LOG_INFO(TAG, "Error: /sdcard directory not accessible");
-        return;
-    }
-    
-    // Check for duplicate before writing
+    // Mount a local SD if the board has one. On a board with no SD (e.g. MonsterC5)
+    // this fails and we fall through to host_append_file(), which streams the append
+    // to the host (Tab5). Do NOT bail out on failure here or the reroute never runs.
+    (void)init_sd_card();
+
+    // Check for duplicate before writing (no-ops on a board with no SD: fopen("r")
+    // returns NULL below and the dedup scan is simply skipped).
     char match_line[256];
     snprintf(match_line, sizeof(match_line), "\"%s\", \"%s\"", ssid, password);
     
@@ -25292,35 +25353,15 @@ static void save_evil_twin_password(const char* ssid, const char* password) {
         fclose(file);
     }
     
-    // Try to open file for appending (use short name without underscore for FAT compatibility)
-    file = fopen("/sdcard/lab/eviltwin.txt", "a");
-    if (file == NULL) {
-        MY_LOG_INFO(TAG, "Failed to open eviltwin.txt for append, errno: %d (%s). Trying to create...", errno, strerror(errno));
-        
-        // Try to create the file first
-        file = fopen("/sdcard/lab/eviltwin.txt", "w");
-        if (file == NULL) {
-            MY_LOG_INFO(TAG, "Failed to create eviltwin.txt, errno: %d (%s)", errno, strerror(errno));
-            return;
-        }
-        // Close and reopen in append mode
-        fclose(file);
-        file = fopen("/sdcard/lab/eviltwin.txt", "a");
-        if (file == NULL) {
-            MY_LOG_INFO(TAG, "Failed to reopen eviltwin.txt, errno: %d (%s)", errno, strerror(errno));
-            return;
-        }
-        MY_LOG_INFO(TAG, "Successfully created eviltwin.txt");
-    }
-    
-    // Write SSID and password in CSV format
-    fprintf(file, "\"%s\", \"%s\"\n", ssid, password);
-    
-    // Flush and close file to ensure data is written to disk
-    fflush(file);
-    fclose(file);
+    // Build the CSV line and append it: local SD if one is mounted, else stream the
+    // append frames to the host (Tab5), which writes /sdcard/lab/eviltwin.txt for us.
+    char et_line[512];
+    int et_len = snprintf(et_line, sizeof(et_line), "\"%s\", \"%s\"\n", ssid, password);
+    if (et_len < 0) return;
+    if (et_len > (int)sizeof(et_line) - 1) et_len = (int)sizeof(et_line) - 1;
+    host_append_file("lab/eviltwin.txt", et_line, (size_t)et_len);
     sd_sync();
-    
+
     MY_LOG_INFO(TAG, "Password saved to eviltwin.txt");
 }
 
@@ -25331,60 +25372,35 @@ static void save_portal_data(const char* ssid, const char* form_data) {
                                 rogueap_mode_active ? "> Rogue AP" : "> Captive Portal";
         oled_display_update_full(mode_name, ssid ? ssid : "", "  Data received!", "  Saving to SD");
     }
-    // Initialize SD card if not already mounted
-    esp_err_t ret = init_sd_card();
-    if (ret != ESP_OK) {
-        MY_LOG_INFO(TAG, "Failed to initialize SD card for portal data logging: %s", esp_err_to_name(ret));
-        return;
-    }
-    
-    // Check if /sdcard directory is accessible
-    struct stat st;
-    if (stat("/sdcard", &st) != 0) {
-        MY_LOG_INFO(TAG, "Error: /sdcard directory not accessible");
-        return;
-    }
-    
-    // Try to open file for appending
-    FILE *file = fopen("/sdcard/lab/portals.txt", "a");
-    if (file == NULL) {
-        MY_LOG_INFO(TAG, "Failed to open portals.txt for append, errno: %d (%s). Trying to create...", errno, strerror(errno));
-        
-        // Try to create the file first
-        file = fopen("/sdcard/lab/portals.txt", "w");
-        if (file == NULL) {
-            MY_LOG_INFO(TAG, "Failed to create portals.txt, errno: %d (%s)", errno, strerror(errno));
-            return;
-        }
-        // Close and reopen in append mode
-        fclose(file);
-        file = fopen("/sdcard/lab/portals.txt", "a");
-        if (file == NULL) {
-            MY_LOG_INFO(TAG, "Failed to reopen portals.txt, errno: %d (%s)", errno, strerror(errno));
-            return;
-        }
-        MY_LOG_INFO(TAG, "Successfully created portals.txt");
-    }
-    
+    // Mount a local SD if the board has one. On a board with no SD (e.g. MonsterC5)
+    // this fails and we fall through to host_append_file(), which streams the append
+    // to the host (Tab5). Do NOT bail out on failure here or the reroute never runs.
+    (void)init_sd_card();
+
+    // Build the whole CSV line in RAM, then append it (local SD if mounted, else
+    // stream to the host). Same on-disk format as the original per-field fprintf().
+    char pd_buf[2048];
+    size_t pd_off = 0;
+
     // Write SSID as first field
-    fprintf(file, "\"%s\", ", ssid ? ssid : "Unknown");
-    
+    host_bufcat(pd_buf, sizeof(pd_buf), &pd_off, "\"%s\", ", ssid ? ssid : "Unknown");
+
     // Parse form data and extract all fields
     // Form data is in format: field1=value1&field2=value2&...
     char *data_copy = strdup(form_data);
     if (data_copy == NULL) {
-        fclose(file);
+        host_append_file("lab/portals.txt", pd_buf, pd_off);
         sd_sync();
         return;
     }
-    
+
     // Count fields first to properly format CSV
     int field_count = 0;
     char *temp_copy = strdup(form_data);
     if (temp_copy == NULL) {
         MY_LOG_INFO(TAG, "Memory allocation failed for temp_copy");
         free(data_copy);
-        fclose(file);
+        host_append_file("lab/portals.txt", pd_buf, pd_off);
         sd_sync();
         return;
     }
@@ -25439,27 +25455,26 @@ static void save_portal_data(const char* ssid, const char* form_data) {
             decoded_value[decoded_len] = '\0';
 
             // Write field name and value in CSV format as key=value
-            fprintf(file, "\"%s=%s\"", decoded_key, decoded_value);
+            host_bufcat(pd_buf, sizeof(pd_buf), &pd_off, "\"%s=%s\"", decoded_key, decoded_value);
 
             // Add comma if not last field
             current_field++;
             if (current_field < field_count) {
-                fprintf(file, ", ");
+                host_bufcat(pd_buf, sizeof(pd_buf), &pd_off, ", ");
             }
         }
         token = strtok(NULL, "&");
     }
-    
+
     // End line
-    fprintf(file, "\n");
-    
-    // Flush and close file to ensure data is written to disk
-    fflush(file);
-    fclose(file);
+    host_bufcat(pd_buf, sizeof(pd_buf), &pd_off, "\n");
+
+    // Append the assembled line: local SD if mounted, else stream to the host (Tab5).
+    host_append_file("lab/portals.txt", pd_buf, pd_off);
     sd_sync();
-    
+
     free(data_copy);
-    
+
     MY_LOG_INFO(TAG, "Portal data saved to portals.txt");
 }
 
