@@ -55,7 +55,7 @@ extern "C" {
 #define CC1101_SPI_HOST  SPI2_HOST
 #endif
 #ifndef CC1101_SPI_CLOCK_HZ
-#define CC1101_SPI_CLOCK_HZ (6 * 1000 * 1000)   /* CC1101 max ~6.5 MHz */
+#define CC1101_SPI_CLOCK_HZ (2 * 1000 * 1000)   /* 2 MHz: reliable over DIY jumper wiring (CC1101 max ~6.5 MHz) */
 #endif
 
 /* ---- Modulation formats (MDMCFG2 MOD_FORMAT) ---- */

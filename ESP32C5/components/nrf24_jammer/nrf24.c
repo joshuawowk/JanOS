@@ -11,7 +11,11 @@
 
 /* nRF24L01+ tolerates up to 10 MHz SPI; 8 MHz keeps a margin for the shared bus
  * and jumper wiring while letting channel hops complete quickly during sweeps. */
-#define NRF24_SPI_CLOCK_HZ (8 * 1000 * 1000)
+/* 2 MHz: the nRF24 tolerates up to 10 MHz on a clean board, but a DIY setup on
+ * jumper wires garbles the register read-back at 8 MHz, so detection
+ * (nrf24_check_connected) fails. 2 MHz is reliable over jumpers and still fast
+ * enough for register writes / channel hopping. */
+#define NRF24_SPI_CLOCK_HZ (2 * 1000 * 1000)
 
 bool nrf24_init(nrf24_device_t* device) {
     if (device->initialized) return true;
@@ -301,6 +305,9 @@ bool nrf24_check_connected(nrf24_device_t* device) {
         uint8_t readback = 0xAB;
         nrf24_read_reg(device, REG_RF_CH, &readback, 1);
         if (readback != probes[i]) {
+            ESP_LOGW(TAG, "SPI read-back mismatch on RF_CH: wrote 0x%02X read 0x%02X "
+                          "(0x00 = no MISO / unpowered nRF24; 0xFF = MISO stuck / CS not asserting)",
+                     probes[i], readback);
             return false;
         }
     }
