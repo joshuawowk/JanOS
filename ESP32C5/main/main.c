@@ -7209,6 +7209,30 @@ static void hs_sanitize_ssid(char *out, const char *in, size_t out_size) {
     }
 }
 
+// Stream a captured PCAP to the host over the console UART, base64-framed, so a
+// client with storage (e.g. the Tab5) can save it even when this board has no SD
+// card. The bytes are already in RAM (pcap_serializer buffer). Each data line is
+// tagged [PCAPD] so the client can ignore any interleaved log lines.
+static void hs_stream_pcap_over_uart(const char *ssid_safe, const char *mac_suffix,
+                                     uint64_t ts, const uint8_t *buf, unsigned size) {
+    printf("[PCAPX name=%s_%s_%llu.pcap size=%u]\n", ssid_safe, mac_suffix,
+           (unsigned long long)ts, size);
+    unsigned char b64[80];
+    uint32_t sum = 0;
+    unsigned off = 0;
+    while (off < size) {
+        unsigned chunk = (size - off > 48u) ? 48u : (size - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, buf + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[PCAPD]%s\n", (char *)b64);
+        }
+        for (unsigned i = 0; i < chunk; i++) sum += buf[off + i];
+        off += chunk;
+    }
+    printf("[PCAPX-END sum=%08lX]\n", (unsigned long)sum);
+}
+
 static bool hs_save_handshake_to_sd(int ap_idx) {
     hs_ap_target_t *ap = &hs_ap_targets[ap_idx];
     
@@ -7241,36 +7265,41 @@ static bool hs_save_handshake_to_sd(int ap_idx) {
     snprintf(filename, sizeof(filename), "/sdcard/lab/handshakes/%s_%s_%llu.pcap",
              ssid_safe, mac_suffix, (unsigned long long)timestamp);
     
+    // Try to save locally to an SD card (a board that has one). If there is no
+    // card / the write fails, stream the PCAP to the host over UART instead, so a
+    // client with storage (e.g. the Tab5) can keep it.
+    bool sd_ok = false;
     FILE *f = fopen(filename, "wb");
-    if (!f) {
-        MY_LOG_INFO(TAG, "[HS-SAVE] Failed to open: %s", filename);
-        return false;
-    }
-    size_t written = fwrite(pcap_buf, 1, pcap_size, f);
-    fclose(f);
-    
-    if (written != pcap_size) {
-        MY_LOG_INFO(TAG, "[HS-SAVE] Incomplete write: %zu/%u", written, pcap_size);
-        return false;
-    }
-    MY_LOG_INFO(TAG, "[HS-SAVE] PCAP saved: %s (%u bytes)", filename, pcap_size);
-    
-    // Save HCCAPX if available
-    if (hccapx) {
-        snprintf(filename, sizeof(filename), "/sdcard/lab/handshakes/%s_%s_%llu.hccapx",
-                 ssid_safe, mac_suffix, (unsigned long long)timestamp);
-        f = fopen(filename, "wb");
-        if (f) {
-            fwrite(hccapx, 1, sizeof(hccapx_t), f);
-            fclose(f);
-            MY_LOG_INFO(TAG, "[HS-SAVE] HCCAPX saved: %s", filename);
+    if (f) {
+        size_t written = fwrite(pcap_buf, 1, pcap_size, f);
+        fclose(f);
+        sd_ok = (written == pcap_size);
+        if (!sd_ok) {
+            MY_LOG_INFO(TAG, "[HS-SAVE] Incomplete write: %zu/%u", written, pcap_size);
+        } else {
+            MY_LOG_INFO(TAG, "[HS-SAVE] PCAP saved: %s (%u bytes)", filename, pcap_size);
+            // Save HCCAPX alongside
+            if (hccapx) {
+                char hfn[128];
+                snprintf(hfn, sizeof(hfn), "/sdcard/lab/handshakes/%s_%s_%llu.hccapx",
+                         ssid_safe, mac_suffix, (unsigned long long)timestamp);
+                FILE *hf = fopen(hfn, "wb");
+                if (hf) {
+                    fwrite(hccapx, 1, sizeof(hccapx_t), hf);
+                    fclose(hf);
+                    MY_LOG_INFO(TAG, "[HS-SAVE] HCCAPX saved: %s", hfn);
+                }
+            }
+            // Sync SD
+            int fd = open("/sdcard/.sync", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) { fsync(fd); close(fd); unlink("/sdcard/.sync"); }
         }
     }
-    
-    // Sync SD
-    int fd = open("/sdcard/.sync", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) { fsync(fd); close(fd); unlink("/sdcard/.sync"); }
-    
+
+    if (!sd_ok) {
+        hs_stream_pcap_over_uart(ssid_safe, mac_suffix, timestamp, pcap_buf, pcap_size);
+    }
+
     // === Backward-compatible UART messages for CardputerADV / Tab5 / FlipperLight ===
     // These exact strings are parsed by all 3 client projects.
     // Tab5 parses "PCAP saved:" and extracts filename from /sdcard/ path.
