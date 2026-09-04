@@ -22,8 +22,15 @@
 #define SUBGHZ_RMT_RES_HZ   1000000u   /* 1 tick = 1 us */
 #define RX_USER_SYMBOLS     256        /* up to 512 edges per burst */
 #define RX_MEM_BLOCK        48         /* C5: 48 words/channel */
-/* Glitch filter and end-of-packet idle for OOK remotes. Bench-tunable. */
-#define RX_MIN_NS           (50u * 1000u)     /* ignore <50us pulses */
+/* Glitch filter and end-of-packet idle for OOK remotes. Bench-tunable.
+ * NOTE: signal_range_min_ns is the RMT HARDWARE glitch filter, clocked off the
+ * ~80 MHz RMT source (not the 1 MHz channel resolution), so it maxes out at
+ * ~3187 ns (255 source ticks). The old 50 us value made rmt_receive() fail with
+ * "signal_range_min_ns too big, should be less than 3187 ns" -> RX never started
+ * and Sub-GHz showed nothing. 3000 ns is the largest valid glitch filter; real
+ * OOK pulses (>100 us) are unaffected. Longer sub-pulse filtering, if ever
+ * needed, must be done in software on the captured symbols. */
+#define RX_MIN_NS           3000u             /* HW glitch filter cap (<3187 ns) */
 #define RX_MAX_NS           (12u * 1000u * 1000u) /* 12ms idle = burst end */
 
 static rmt_channel_handle_t s_rx_chan = NULL;
