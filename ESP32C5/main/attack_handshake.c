@@ -19,6 +19,7 @@
 #include "esp_wifi_types.h"
 #include "esp_wifi.h"
 #include "esp_timer.h"
+#include "esp_random.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -32,6 +33,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <sys/stat.h>
+#include "mbedtls/base64.h"
 
 static const char *TAG = "attack_handshake";
 static attack_handshake_methods_t method = -1;
@@ -673,6 +675,32 @@ static void sd_sync(void) {
     }
 }
 
+// Stream a captured PCAP to the host over the console UART, base64-framed, so a
+// client with storage (e.g. the Tab5) can save it even when this board has no SD
+// card. Bytes are already in RAM (pcap_serializer). Each data line is tagged
+// [PCAPD] so the client can skip any interleaved log lines.
+static void ah_stream_pcap_over_uart(const char *ssid_safe, const char *mac_suffix,
+                                     uint64_t ts, const uint8_t *buf, unsigned size) {
+    /* Random suffix keeps names unique across reboots (ts is uptime-ms, resets on
+     * power-cycle -> would otherwise collide and overwrite an earlier capture). */
+    printf("[PCAPX name=%s_%s_%llu_%08lX.pcap size=%u]\n", ssid_safe, mac_suffix,
+           (unsigned long long)ts, (unsigned long)esp_random(), size);
+    unsigned char b64[80];
+    uint32_t sum = 0;
+    unsigned off = 0;
+    while (off < size) {
+        unsigned chunk = (size - off > 48u) ? 48u : (size - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, buf + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[PCAPD]%s\n", (char *)b64);
+        }
+        for (unsigned i = 0; i < chunk; i++) sum += buf[off + i];
+        off += chunk;
+    }
+    printf("[PCAPX-END sum=%08lX]\n", (unsigned long)sum);
+}
+
 bool attack_handshake_save_to_sd() {
     printf("=== Attempting to save handshake to SD card ===\n");
     
@@ -741,10 +769,15 @@ bool attack_handshake_save_to_sd() {
     
     FILE *f = fopen(filename, "wb");
     if (!f) {
-        printf("✗ Failed to open file for writing: %s\n", filename);
-        return false;
+        // No SD card here: stream the PCAP to the host over UART so a client with
+        // storage (e.g. the Tab5) can save it. Bytes are already in RAM.
+        printf("No local SD - streaming PCAP to host: %s\n", filename);
+        ah_stream_pcap_over_uart(ssid_safe, mac_suffix, timestamp, pcap_buf, pcap_size);
+        printf("✓ Complete 4-way handshake saved for SSID: %s (MAC: %s, message_pair: %d)\n",
+               ssid_safe, mac_suffix, hccapx->message_pair);
+        return true;
     }
-    
+
     size_t written = fwrite(pcap_buf, 1, pcap_size, f);
     fclose(f);
     sd_sync();
