@@ -13756,50 +13756,75 @@ static const nmap_port_entry_t nmap_ports[] = {
 #define NMAP_PORTS_QUICK   20
 #define NMAP_PORTS_MEDIUM  50
 #define NMAP_PORTS_HEAVY  100
-#define NMAP_CONNECT_TIMEOUT_MS 500
+/* Per-batch connect window. Bumped from 500ms: a hardened host (e.g. an iDRAC /
+ * Dell server that drops unsolicited SYNs and answers slowly) needs >500ms over
+ * WiFi, so open ports were intermittently missed -> "nothing came up". The scan
+ * is now parallel-batched, so a longer window doesn't make it linearly slower. */
+#define NMAP_CONNECT_TIMEOUT_MS 1500
+/* Concurrent non-blocking connects per batch. Keep well under
+ * CONFIG_LWIP_MAX_SOCKETS (10) to leave headroom for the DHCP/DNS sockets. */
+#define NMAP_BATCH 6
 
-static bool nmap_check_port(uint32_t ip_net_order, uint16_t port)
+/* Scan n ports (nmap_ports[first .. first+n-1]) of one host in parallel: fire
+ * all non-blocking connects, then wait one NMAP_CONNECT_TIMEOUT_MS select()
+ * window for the whole batch. Logs each open port; returns the open count. */
+static int nmap_scan_batch(uint32_t ip_net_order, int first, int n)
 {
-    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (sock < 0) return false;
+    int socks[NMAP_BATCH];
+    for (int j = 0; j < n; j++) socks[j] = -1;
+    int opened = 0;
 
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port   = htons(port),
-        .sin_addr.s_addr = ip_net_order,
-    };
-
-    int ret = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
-    if (ret == 0) {
-        close(sock);
-        return true;
-    }
-    if (errno != EINPROGRESS) {
-        close(sock);
-        return false;
+    for (int j = 0; j < n; j++) {
+        int s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (s < 0) continue;   /* out of sockets -> skip (handled gracefully) */
+        int fl = fcntl(s, F_GETFL, 0);
+        fcntl(s, F_SETFL, fl | O_NONBLOCK);
+        struct sockaddr_in a = {
+            .sin_family = AF_INET,
+            .sin_port   = htons(nmap_ports[first + j].port),
+            .sin_addr.s_addr = ip_net_order,
+        };
+        int r = connect(s, (struct sockaddr *)&a, sizeof(a));
+        if (r == 0) {
+            MY_LOG_INFO(TAG, "  %5d/tcp  open  %s",
+                        nmap_ports[first + j].port, nmap_ports[first + j].name);
+            opened++;
+            close(s);
+        } else if (errno == EINPROGRESS) {
+            socks[j] = s;      /* pending -> resolved by select() below */
+        } else {
+            close(s);          /* refused/unreachable */
+        }
     }
 
     fd_set wset;
     FD_ZERO(&wset);
-    FD_SET(sock, &wset);
-    struct timeval tv = {
-        .tv_sec  = NMAP_CONNECT_TIMEOUT_MS / 1000,
-        .tv_usec = (NMAP_CONNECT_TIMEOUT_MS % 1000) * 1000,
-    };
-
-    bool open = false;
-    if (select(sock + 1, NULL, &wset, NULL, &tv) > 0) {
-        int so_err = 0;
-        socklen_t len = sizeof(so_err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_err, &len);
-        open = (so_err == 0);
+    int maxfd = -1;
+    for (int j = 0; j < n; j++) {
+        if (socks[j] >= 0) { FD_SET(socks[j], &wset); if (socks[j] > maxfd) maxfd = socks[j]; }
     }
-
-    close(sock);
-    return open;
+    if (maxfd >= 0) {
+        struct timeval tv = {
+            .tv_sec  = NMAP_CONNECT_TIMEOUT_MS / 1000,
+            .tv_usec = (NMAP_CONNECT_TIMEOUT_MS % 1000) * 1000,
+        };
+        select(maxfd + 1, NULL, &wset, NULL, &tv);
+        for (int j = 0; j < n; j++) {
+            if (socks[j] < 0) continue;
+            if (FD_ISSET(socks[j], &wset)) {
+                int so_err = 0;
+                socklen_t len = sizeof(so_err);
+                getsockopt(socks[j], SOL_SOCKET, SO_ERROR, &so_err, &len);
+                if (so_err == 0) {
+                    MY_LOG_INFO(TAG, "  %5d/tcp  open  %s",
+                                nmap_ports[first + j].port, nmap_ports[first + j].name);
+                    opened++;
+                }
+            }
+            close(socks[j]);
+        }
+    }
+    return opened;
 }
 
 static int cmd_start_nmap(int argc, char **argv)
@@ -13837,6 +13862,21 @@ static int cmd_start_nmap(int argc, char **argv)
     log_memory_info("start_nmap");
 
     MY_LOG_INFO(TAG, "Scan level: %s (%d ports)", level_name, port_count);
+
+    /* Make sure the STA actually has an IP before scanning. wifi_connect reports
+     * SUCCESS on association, which can be before DHCP finishes; scanning then
+     * has no source IP/route and every port reads closed -> "nothing came up".
+     * Waiting here (up to 8s) closes that race, and logging the IP exposes a
+     * subnet mismatch (e.g. local 192.168.1.x vs a 192.168.0.x target). */
+    {
+        esp_netif_ip_info_t nmap_ip = {0};
+        if (wait_for_sta_ip_info(&nmap_ip, 8000) && nmap_ip.ip.addr != 0) {
+            MY_LOG_INFO(TAG, "NMAP: local IP " IPSTR " netmask " IPSTR,
+                        IP2STR(&nmap_ip.ip), IP2STR(&nmap_ip.netmask));
+        } else {
+            MY_LOG_INFO(TAG, "NMAP: WARNING no STA IP (DHCP pending / not connected) -- results may be empty");
+        }
+    }
 
     discovered_host_t *hosts = calloc(DISCOVER_MAX_HOSTS, sizeof(discovered_host_t));
     if (!hosts) {
@@ -13887,24 +13927,21 @@ static int cmd_start_nmap(int argc, char **argv)
         }
 
         int open_on_host = 0;
-        for (int p = 0; p < port_count; p++) {
+        for (int p = 0; p < port_count; p += NMAP_BATCH) {
             if (operation_stop_requested) break;
-            if (p % 10 == 0) {
-                int end_p = p + 9;
-                if (end_p >= port_count) end_p = port_count - 1;
-                MY_LOG_INFO(TAG, "  Scanning %s ports %d-%d [%d/%d] ...",
-                            ip_str, nmap_ports[p].port, nmap_ports[end_p].port, p + 1, port_count);
-                char oled_prog[40];
-                snprintf(oled_prog, sizeof(oled_prog), "  Port %d/%d (%d-%d)",
-                         p + 1, port_count, nmap_ports[p].port, nmap_ports[end_p].port);
-                oled_display_update_full("> NMAP Scan", oled_line, oled_prog, "");
-            }
-            if (nmap_check_port(host_ip, nmap_ports[p].port)) {
-                MY_LOG_INFO(TAG, "  %5d/tcp  open  %s",
-                            nmap_ports[p].port, nmap_ports[p].name);
-                open_on_host++;
-                total_open++;
-            }
+            int bn = port_count - p;
+            if (bn > NMAP_BATCH) bn = NMAP_BATCH;
+            int end_p = p + bn - 1;
+            MY_LOG_INFO(TAG, "  Scanning %s ports %d-%d [%d/%d] ...",
+                        ip_str, nmap_ports[p].port, nmap_ports[end_p].port, p + 1, port_count);
+            char oled_prog[40];
+            snprintf(oled_prog, sizeof(oled_prog), "  Port %d/%d (%d-%d)",
+                     p + 1, port_count, nmap_ports[p].port, nmap_ports[end_p].port);
+            oled_display_update_full("> NMAP Scan", oled_line, oled_prog, "");
+
+            int o = nmap_scan_batch(host_ip, p, bn);
+            open_on_host += o;
+            total_open   += o;
             vTaskDelay(pdMS_TO_TICKS(10));
         }
         if (operation_stop_requested) {
