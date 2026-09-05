@@ -404,12 +404,14 @@ typedef struct {
 
 static volatile bool pcap_capture_active = false;
 static pcap_capture_mode_t pcap_capture_mode = PCAP_MODE_NONE;
-static FILE *pcap_capture_file = NULL;
 static TaskHandle_t pcap_writer_task_handle = NULL;
 static QueueHandle_t pcap_packet_queue = NULL;
 static uint32_t pcap_capture_frame_count = 0;
 static uint32_t pcap_capture_drop_count = 0;
-static char pcap_capture_filepath[64];
+static char pcap_capture_filepath[80];
+/* Path under /sdcard for the active pcap stream (no local SD on this board, so each
+ * record is streamed to the host as a [FILEA] append frame). Read by pcap_writer_task. */
+static char pcap_capture_relpath[80];
 static netif_input_fn pcap_original_input = NULL;
 static netif_linkoutput_fn pcap_original_linkoutput = NULL;
 
@@ -2154,6 +2156,11 @@ static esp_err_t init_sd_card(void);
 static bool sd_mkdir_recursive(const char *path);
 static esp_err_t create_sd_directories(void);
 static void sd_sync(void);
+// Storage reroute helpers (defined later, near host_save_file). Forward-declared here
+// because the wardrive task uses host_append_line() before its definition.
+static bool host_save_file(const char *relpath, const void *data, size_t len);
+static bool host_append_file(const char *relpath, const void *data, size_t len);
+static void host_append_line(const char *relpath, const char *fmt, ...);
 static void safe_restart(void);
 static bool parse_gps_nmea(const char* nmea_sentence);
 static void get_timestamp_string(char* buffer, size_t size);
@@ -6289,6 +6296,10 @@ static void wardrive_promisc_task(void *pvParameters) {
 
     int64_t last_stats_time = esp_timer_get_time();
     int last_flush_count = 0;
+    // Emit the WigleWifi header only on the first flush of this session. Without a local
+    // SD we can't fseek/ftell an empty file, so track it here (task-local => resets each
+    // wardrive run, matching the fresh per-session CSV file).
+    bool wdp_csv_header_done = false;
     int gps_fix_lost_count = 0;
     #define WDP_GPS_FIX_LOST_THRESHOLD 3
 
@@ -6491,18 +6502,19 @@ static void wardrive_promisc_task(void *pvParameters) {
 
             char filename[80];
             snprintf(filename, sizeof(filename), "%s", wardrive_csv_path);
+            // relpath under /sdcard for host_append_file() (skip the leading "/sdcard/").
+            const char *wd_rel = filename + 8;
 
             struct stat st;
             if (stat("/sdcard/lab/wardrives", &st) != 0) {
-                MY_LOG_INFO(TAG, "Error: /sdcard/lab/wardrives directory not accessible");
-            } else {
-                FILE *file = fopen(filename, "a");
-                if (!file) file = fopen(filename, "w");
-                if (file) {
-                    fseek(file, 0, SEEK_END);
-                    if (ftell(file) == 0) {
-                        fprintf(file, "WigleWifi-1.6,appRelease=v1.1,model=MonsterC5,release=v1.0,device=MonsterC5,display=SPI TFT,board=ESP32C5,brand=LAB5\n");
-                        fprintf(file, "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n");
+                mkdir("/sdcard/lab/wardrives", 0755);  // best-effort; host creates its own dir
+            }
+            {
+                {
+                    if (!wdp_csv_header_done) {
+                        host_append_line(wd_rel, "WigleWifi-1.6,appRelease=v1.1,model=MonsterC5,release=v1.0,device=MonsterC5,display=SPI TFT,board=ESP32C5,brand=LAB5\n");
+                        host_append_line(wd_rel, "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n");
+                        wdp_csv_header_done = true;
                     }
 
                     for (int i = 0; i < current_count; i++) {
@@ -6528,13 +6540,13 @@ static void wardrive_promisc_task(void *pvParameters) {
                         format_epoch_utc(obs_t, timestamp, sizeof(timestamp));
 
                         if (wdp_seen_networks[i].obs_gps_valid) {
-                            fprintf(file, "%s,%s,[%s],%s,%d,%d,%d,%.7f,%.7f,%.2f,%.2f,,,WIFI\n",
+                            host_append_line(wd_rel, "%s,%s,[%s],%s,%d,%d,%d,%.7f,%.7f,%.2f,%.2f,,,WIFI\n",
                                     mac_str, escaped_ssid, auth_str, timestamp,
                                     wdp_seen_networks[i].channel, wifi_freq_mhz, (int)wdp_seen_networks[i].rssi,
                                     wdp_seen_networks[i].obs_lat, wdp_seen_networks[i].obs_lon,
                                     wdp_seen_networks[i].obs_alt, wdp_seen_networks[i].obs_acc);
                         } else {
-                            fprintf(file, "%s,%s,[%s],%s,%d,%d,%d,0.0000000,0.0000000,0.00,0.00,,,WIFI\n",
+                            host_append_line(wd_rel, "%s,%s,[%s],%s,%d,%d,%d,0.0000000,0.0000000,0.00,0.00,,,WIFI\n",
                                     mac_str, escaped_ssid, auth_str, timestamp,
                                     wdp_seen_networks[i].channel, wifi_freq_mhz, (int)wdp_seen_networks[i].rssi);
                         }
@@ -6571,7 +6583,7 @@ static void wardrive_promisc_task(void *pvParameters) {
                             time_t bt_obs_t = bt_devices[i].obs_time ? bt_devices[i].obs_time : time(NULL);
                             format_epoch_utc(bt_obs_t, bt_ts, sizeof(bt_ts));
                             if (bt_devices[i].obs_gps_valid) {
-                                fprintf(file, "%s,%s,%s,%s,0,,%d,%.7f,%.7f,%.2f,%.2f,,%s,BLE\n",
+                                host_append_line(wd_rel, "%s,%s,%s,%s,0,,%d,%.7f,%.7f,%.2f,%.2f,,%s,BLE\n",
                                         bt_mac, escaped_bt_name, bt_cap, bt_ts,
                                         (int)bt_devices[i].rssi,
                                         bt_devices[i].obs_lat, bt_devices[i].obs_lon,
@@ -6582,7 +6594,7 @@ static void wardrive_promisc_task(void *pvParameters) {
                                        bt_devices[i].obs_lat, bt_devices[i].obs_lon,
                                        bt_devices[i].obs_alt, bt_devices[i].obs_acc, bt_mfgr_id);
                             } else {
-                                fprintf(file, "%s,%s,%s,%s,0,,%d,0.0000000,0.0000000,0.00,0.00,,%s,BLE\n",
+                                host_append_line(wd_rel, "%s,%s,%s,%s,0,,%d,0.0000000,0.0000000,0.00,0.00,,%s,BLE\n",
                                         bt_mac, escaped_bt_name, bt_cap, bt_ts,
                                         (int)bt_devices[i].rssi, bt_mfgr_id);
                                 printf("%s,%s,%s,%s,0,,%d,0.0000000,0.0000000,0.00,0.00,,%s,BLE\n",
@@ -6602,7 +6614,7 @@ static void wardrive_promisc_task(void *pvParameters) {
                         wdp_bt_flush_count = bt_total;
                     }
 
-                    fclose(file);
+                    // Streaming: each row was appended live; nothing to close.
                     sd_sync();
                     last_flush_count = current_count;
                     MY_LOG_INFO(TAG, "Flushed %d networks + %d BT devices to %s",
@@ -7308,6 +7320,20 @@ static void host_bufcat(char *buf, size_t cap, size_t *off, const char *fmt, ...
     if (n < 0) return;
     *off += (size_t)n;
     if (*off >= cap) *off = cap - 1;   /* truncated: keep offset in-bounds */
+}
+
+/* Format one line and append it via host_append_file() (local SD if mounted, else a
+ * [FILEA] stream frame to the host). A 1:1 drop-in for fprintf(file, ...) at rerouted
+ * incremental-append sites (wardrive CSV rows, KML placemarks, ...). */
+static void host_append_line(const char *relpath, const char *fmt, ...) {
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;   /* truncated: send what fit */
+    host_append_file(relpath, line, (size_t)n);
 }
 
 static bool hs_save_handshake_to_sd(int ap_idx) {
@@ -11707,11 +11733,9 @@ static int cmd_stop(int argc, char **argv) {
             pcap_packet_queue = NULL;
         }
 
-        if (pcap_capture_file) {
-            fclose(pcap_capture_file);
-            pcap_capture_file = NULL;
-            sd_sync();
-        }
+        // Streaming: no local file handle to close; the writer task appended each record
+        // live. sd_sync() is a harmless no-op without a local SD.
+        sd_sync();
 
         MY_LOG_INFO(TAG, "PCAP saved: %s (%lu frames, %lu drops)",
                     pcap_capture_filepath,
@@ -15233,30 +15257,24 @@ static int cmd_start_pcap(int argc, char **argv) {
         }
     }
 
-    esp_err_t ret = init_sd_card();
-    if (ret != ESP_OK) {
-        MY_LOG_INFO(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
-        return 1;
-    }
+    // Attempt a local SD mount; on a board with no SD (e.g. MonsterC5) this fails and
+    // the pcap is streamed to the host (Tab5) instead. Do NOT bail out on failure here
+    // or capture never starts. The host creates /sdcard/lab/pcaps on its first append.
+    (void)init_sd_card();
 
     struct stat st;
     if (stat("/sdcard/lab/pcaps", &st) != 0) {
-        if (mkdir("/sdcard/lab/pcaps", 0755) != 0) {
-            MY_LOG_INFO(TAG, "Failed to create /sdcard/lab/pcaps directory");
-            return 1;
-        }
+        mkdir("/sdcard/lab/pcaps", 0755);   // best-effort; harmless failure without a local SD
         sd_sync();
     }
 
     int file_num = find_next_pcap_file_number();
+    // Unique per-capture suffix: with no local SD to check for existing names, a reboot
+    // could otherwise reuse a number and overwrite the host-side file.
     snprintf(pcap_capture_filepath, sizeof(pcap_capture_filepath),
-             "/sdcard/lab/pcaps/sniff_%d.pcap", file_num);
-
-    pcap_capture_file = fopen(pcap_capture_filepath, "wb");
-    if (!pcap_capture_file) {
-        MY_LOG_INFO(TAG, "Failed to open %s for writing", pcap_capture_filepath);
-        return 1;
-    }
+             "/sdcard/lab/pcaps/sniff_%d_%08lX.pcap", file_num, (unsigned long)esp_random());
+    // relpath = path under /sdcard (skip the leading "/sdcard/") for host_append_file().
+    snprintf(pcap_capture_relpath, sizeof(pcap_capture_relpath), "%s", pcap_capture_filepath + 8);
 
     uint32_t linktype = (mode == PCAP_MODE_RADIO) ? 105 : 1;
     pcap_global_header_t ghdr = {
@@ -15268,8 +15286,10 @@ static int cmd_start_pcap(int argc, char **argv) {
         .snaplen = 65535,
         .network = linktype
     };
-    fwrite(&ghdr, 1, sizeof(ghdr), pcap_capture_file);
-    fflush(pcap_capture_file);
+    // Stream the pcap global header. The first [FILEA] append creates the file on the
+    // host; pcap_writer_task appends each record after it, in UART order. Throughput is
+    // UART-bound (best-effort under heavy capture) -- the only way to save with no SD.
+    host_append_file(pcap_capture_relpath, &ghdr, sizeof(ghdr));
 
     pcap_capture_frame_count = 0;
     pcap_capture_drop_count = 0;
@@ -15277,9 +15297,7 @@ static int cmd_start_pcap(int argc, char **argv) {
     pcap_packet_queue = xQueueCreate(256, sizeof(pcap_queued_frame_t *));
     if (!pcap_packet_queue) {
         MY_LOG_INFO(TAG, "Failed to create PCAP packet queue");
-        fclose(pcap_capture_file);
-        pcap_capture_file = NULL;
-        return 1;
+        return 1;   // streaming: no local file handle to close
     }
 
     pcap_capture_mode = mode;
@@ -15304,8 +15322,6 @@ static int cmd_start_pcap(int argc, char **argv) {
         if (!sta_netif) {
             MY_LOG_INFO(TAG, "Failed to get STA netif");
             pcap_capture_active = false;
-            fclose(pcap_capture_file);
-            pcap_capture_file = NULL;
             vQueueDelete(pcap_packet_queue);
             pcap_packet_queue = NULL;
             return 1;
@@ -15315,8 +15331,6 @@ static int cmd_start_pcap(int argc, char **argv) {
         if (!lwip_nif) {
             MY_LOG_INFO(TAG, "Failed to get lwIP netif");
             pcap_capture_active = false;
-            fclose(pcap_capture_file);
-            pcap_capture_file = NULL;
             vQueueDelete(pcap_packet_queue);
             pcap_packet_queue = NULL;
             return 1;
@@ -17655,6 +17669,9 @@ static void wardrive_task(void *pvParameters) {
 
     // Main wardrive loop (runs until user stops)
     int scan_counter = 0;
+    // Emit the WigleWifi header only on the first write of this session (no local SD to
+    // fseek/ftell for emptiness). Resets each wardrive run (fresh w%d.log per session).
+    bool wd_header_done = false;
     while (wardrive_active && !operation_stop_requested) {
         // Check for stop request at the beginning of loop
         if (operation_stop_requested || !wardrive_active) {
@@ -17756,35 +17773,23 @@ static void wardrive_task(void *pvParameters) {
         // Create filename (keep it simple for FAT filesystem)
         char filename[64];
         snprintf(filename, sizeof(filename), "/sdcard/lab/wardrives/w%d.log", wardrive_file_counter);
-        
-        // Check if /sdcard/lab/wardrives directory is accessible
+        // relpath under /sdcard for host_append_file() (skip the leading "/sdcard/").
+        const char *wd_rel = filename + 8;
+
+        // Ensure the dir on a local SD if present; on a board with no SD (e.g. MonsterC5)
+        // this is a harmless no-op and the log is streamed to the host, which makes its
+        // own /sdcard/lab/wardrives. Do NOT bail out here or wardrive never logs.
         struct stat st;
         if (stat("/sdcard/lab/wardrives", &st) != 0) {
-            MY_LOG_INFO(TAG, "Error: /sdcard/lab/wardrives directory not accessible");
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
+            mkdir("/sdcard/lab/wardrives", 0755);
         }
-        
-        // Open file for appending
-        FILE *file = fopen(filename, "a");
-        if (file == NULL) {
-            MY_LOG_INFO(TAG, "Failed to open file %s, errno: %d (%s)", filename, errno, strerror(errno));
-            
-            // Try creating file with different approach
-            file = fopen(filename, "w");
-            if (file == NULL) {
-                MY_LOG_INFO(TAG, "Failed to create file %s, errno: %d (%s)", filename, errno, strerror(errno));
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-            MY_LOG_INFO(TAG, "Successfully created file %s", filename);
-        }
-        
-        // Write header if file is new
-        fseek(file, 0, SEEK_END);
-        if (ftell(file) == 0) {
-            fprintf(file, "WigleWifi-1.6,appRelease=v1.1,model=Gen4,release=v1.0,device=Gen4Board,display=SPI TFT,board=ESP32C5,brand=Laboratorium\n");
-            fprintf(file, "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n");
+
+        // Write header once per session. Without a local SD we can't fseek/ftell an empty
+        // file, so emit it on the first write; the first [FILEA] append creates the file.
+        if (!wd_header_done) {
+            host_append_line(wd_rel, "WigleWifi-1.6,appRelease=v1.1,model=Gen4,release=v1.0,device=Gen4Board,display=SPI TFT,board=ESP32C5,brand=Laboratorium\n");
+            host_append_line(wd_rel, "MAC,SSID,AuthMode,FirstSeen,Channel,Frequency,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,RCOIs,MfgrId,Type\n");
+            wd_header_done = true;
         }
         
         // Get timestamp
@@ -17824,13 +17829,12 @@ static void wardrive_task(void *pvParameters) {
                         ap->primary, wifi_freq_mhz, ap->rssi);
             }
             
-            // Write to file and print to UART
-            fprintf(file, "%s", line);
+            // Append to the log (local SD or [FILEA] stream) and print to UART live feed.
+            host_append_file(wd_rel, line, strlen(line));
             printf("%s", line);
         }
-        
-        // Close file to ensure data is written
-        fclose(file);
+
+        // Streaming: each row was appended live; nothing to close.
         sd_sync();
         
         if (scan_count > 0) {
@@ -20492,11 +20496,11 @@ static void xml_escape(const char *in, char *out, size_t outsz)
 // </Placemark>, trimming the tail and appending </Folder></Document></kml>.
 static bool wardrive_trace_init_file(const char *path)
 {
-    FILE *file = fopen(path, "w");
-    if (!file) {
-        return false;
-    }
-    fprintf(file,
+    // Stream the KML header. The first [FILEA] append creates the file on the host
+    // (Tab5); on a board with a local SD, host_append_file() writes there instead.
+    // Too long for the 512-byte host_append_line() buffer, so send it whole.
+    const char *rel = path + 8;   // path always starts with "/sdcard/"
+    static const char *kml_hdr =
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
         "<kml xmlns=\"http://www.opengis.net/kml/2.2\">\n"
         "<Document>\n"
@@ -20518,8 +20522,8 @@ static bool wardrive_trace_init_file(const char *path)
         "  <Style id=\"airTagPoi\"><IconStyle><color>ffff00ff</color><scale>0.6</scale></IconStyle><LabelStyle><color>ffff00ff</color><scale>0.8</scale></LabelStyle></Style>\n"
         "  <Style id=\"smartTagPoi\"><IconStyle><color>ff00d7ff</color><scale>0.6</scale></IconStyle><LabelStyle><color>ff00d7ff</color><scale>0.8</scale></LabelStyle></Style>\n"
         "  <Folder>\n"
-        "    <name>Wardrive</name>\n");
-    fclose(file);
+        "    <name>Wardrive</name>\n";
+    host_append_file(rel, kml_hdr, strlen(kml_hdr));
     return true;
 }
 
@@ -20533,9 +20537,11 @@ static bool wdp_trace_flush_segment(const char *path, wdp_trace_ctx_t *c)
     int total = c->seg_n + (c->have_prev ? 1 : 0);
     if (total < 2) return false;   // keep buffering until the line has 2+ points
 
-    FILE *file = fopen(path, "a");
-    if (!file) return false;
-    fprintf(file,
+    // Stream the segment as [FILEA] append frames (local SD if one is mounted). Each
+    // fprintf() becomes one host_append_line(); order is preserved, so the host file
+    // reassembles byte-for-byte identically.
+    const char *rel = path + 8;   // path always starts with "/sdcard/"
+    host_append_line(rel,
         "    <Placemark>\n"
         "      <name>seg %d</name>\n"
         "      <styleUrl>#traceSeg</styleUrl>\n"
@@ -20544,16 +20550,15 @@ static bool wdp_trace_flush_segment(const char *path, wdp_trace_ctx_t *c)
         "        <coordinates>\n",
         c->seg_written + 1);
     if (c->have_prev) {
-        fprintf(file, "          %.7f,%.7f,%.2f\n", c->prev_lon, c->prev_lat, c->prev_alt);
+        host_append_line(rel, "          %.7f,%.7f,%.2f\n", c->prev_lon, c->prev_lat, c->prev_alt);
     }
     for (int i = 0; i < c->seg_n; i++) {
-        fprintf(file, "          %.7f,%.7f,%.2f\n", c->seg_lon[i], c->seg_lat[i], c->seg_alt[i]);
+        host_append_line(rel, "          %.7f,%.7f,%.2f\n", c->seg_lon[i], c->seg_lat[i], c->seg_alt[i]);
     }
-    fprintf(file,
+    host_append_line(rel,
         "        </coordinates>\n"
         "      </LineString>\n"
         "    </Placemark>\n");
-    fclose(file);
     sd_sync();
 
     // Remember the last written vertex to stitch the next segment onto, clear buffer.
@@ -20637,8 +20642,7 @@ static const char *wdp_trace_ble_style(const wdp_poi_msg_t *p)
 static bool wdp_trace_write_poi(const char *path, wdp_trace_ctx_t *c, const wdp_poi_msg_t *p)
 {
     if (!c || !p) return false;
-    FILE *file = fopen(path, "a");
-    if (!file) return false;
+    const char *rel = path + 8;   // path always starts with "/sdcard/"
 
     char mac[18];
     snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -20676,15 +20680,14 @@ static bool wdp_trace_write_poi(const char *path, wdp_trace_ctx_t *c, const wdp_
     char desc_esc[384];
     xml_escape(desc_raw, desc_esc, sizeof(desc_esc));
 
-    fprintf(file,
-        "    <Placemark>\n"
-        "      <name>%s</name>\n"
-        "      <styleUrl>%s</styleUrl>\n"
-        "      <description>%s</description>\n"
-        "      <Point><coordinates>%.7f,%.7f,%.2f</coordinates></Point>\n"
-        "    </Placemark>\n",
-        name_esc, style, desc_esc, p->lon, p->lat, p->alt);
-    fclose(file);
+    // Stream the POI placemark. Split across host_append_line() calls so each stays
+    // within its 512-byte line buffer (name_esc/desc_esc are up to 384 each); the
+    // frames concatenate on the host to the exact same bytes as the original fprintf.
+    host_append_line(rel, "    <Placemark>\n      <name>%s</name>\n", name_esc);
+    host_append_line(rel, "      <styleUrl>%s</styleUrl>\n", style);
+    host_append_line(rel, "      <description>%s</description>\n", desc_esc);
+    host_append_line(rel, "      <Point><coordinates>%.7f,%.7f,%.2f</coordinates></Point>\n", p->lon, p->lat, p->alt);
+    host_append_line(rel, "    </Placemark>\n");
     c->poi_written++;
     return true;
 }
@@ -20693,15 +20696,12 @@ static bool wdp_trace_write_poi(const char *path, wdp_trace_ctx_t *c, const wdp_
 // in-progress file a fully valid KML before it is renamed to its final name.
 static void wardrive_trace_finalize_file(const char *path)
 {
-    FILE *file = fopen(path, "a");
-    if (!file) {
-        return;
-    }
-    fprintf(file,
+    // Stream the closing tags so the host file becomes valid KML.
+    const char *rel = path + 8;   // path always starts with "/sdcard/"
+    host_append_line(rel,
         "  </Folder>\n"
         "</Document>\n"
         "</kml>\n");
-    fclose(file);
 }
 
 /**
@@ -23764,7 +23764,6 @@ static err_t pcap_netif_linkoutput_hook(struct netif *netif, struct pbuf *p) {
 
 static void pcap_writer_task(void *param) {
     (void)param;
-    uint32_t flush_counter = 0;
     pcap_queued_frame_t *frame = NULL;
 
     MY_LOG_INFO(TAG, "PCAP writer task started");
@@ -23777,15 +23776,12 @@ static void pcap_writer_task(void *param) {
                 .incl_len = frame->len,
                 .orig_len = frame->len
             };
-            fwrite(&rec, 1, sizeof(rec), pcap_capture_file);
-            fwrite(frame->data, 1, frame->len, pcap_capture_file);
+            // Stream this record: header then payload, each as a [FILEA] append frame
+            // (in order). host_append_file() writes a local SD if one is mounted.
+            host_append_file(pcap_capture_relpath, &rec, sizeof(rec));
+            host_append_file(pcap_capture_relpath, frame->data, frame->len);
             free(frame);
             pcap_capture_frame_count++;
-            flush_counter++;
-            if (flush_counter >= 50) {
-                fflush(pcap_capture_file);
-                flush_counter = 0;
-            }
         }
     }
 
@@ -23796,15 +23792,13 @@ static void pcap_writer_task(void *param) {
             .incl_len = frame->len,
             .orig_len = frame->len
         };
-        fwrite(&rec, 1, sizeof(rec), pcap_capture_file);
-        fwrite(frame->data, 1, frame->len, pcap_capture_file);
+        host_append_file(pcap_capture_relpath, &rec, sizeof(rec));
+        host_append_file(pcap_capture_relpath, frame->data, frame->len);
         free(frame);
         pcap_capture_frame_count++;
     }
 
-    fflush(pcap_capture_file);
-    fclose(pcap_capture_file);
-    pcap_capture_file = NULL;
+    // Streaming: nothing to close; sd_sync() is a no-op without a local SD.
     sd_sync();
 
     MY_LOG_INFO(TAG, "PCAP writer done: %s (%lu frames, %lu drops)",
