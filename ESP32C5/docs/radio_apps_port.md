@@ -72,3 +72,12 @@ JanOS branch: feat/radio-apps-port (off feat/swappable-cc1101-nrf24).
 MonsterC5 branch: feat/radio-apps-port (off feat/tab5-sd-landscape-a164kbd).
 Commit only newly added feature files/edits; leave the user's pre-existing uncommitted
 changes for them to cut. No pushes to main; no force-push.
+
+## Update: BLE spam is native-BLE (feature #4)
+Source review confirmed all reference tools transmit BLE popups with the ESP's own
+BLE controller, not the nRF24. JanOS already runs the NimBLE host, so `ble_spam`
+(apple|samsung|google|windows|all) broadcasts crafted non-connectable adv PDUs via
+NimBLE GAP with a rotating random address. Tokens: `[BLE_SPAM_START] type=`,
+`[BLE_SPAM] sent=`, `[BLE_SPAM_STOP] sent=`. Tab5 screen: ble_spam_screen.c.
+Tab5 screens added: nrf_scanner, subghz_spectrum, nrf_esb, subghz_brute,
+subghz_jamdet, ble_spam (+ radio_waterfall widget).
