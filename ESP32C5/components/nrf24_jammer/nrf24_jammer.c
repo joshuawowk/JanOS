@@ -1,5 +1,6 @@
 #include "nrf24_jammer.h"
 #include "nrf24.h"
+#include "nrf24_apps.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -42,6 +43,10 @@
 
 static nrf24_device_t s_dev;
 static bool s_initialized = false;
+
+/* Accessors so nrf24_apps.c drives the same single initialized radio. */
+nrf24_device_t *nrf24_jammer_device(void) { return &s_dev; }
+bool            nrf24_jammer_ready(void)  { return s_initialized; }
 
 static volatile bool s_jam_stop = true;
 static volatile bool s_jam_running = false;
@@ -274,6 +279,8 @@ const char* nrf24_jammer_band_name(nrf24_jam_band_t band) {
         case JAM_WIFI: return "wifi";
         case JAM_DRONE: return "drone";
         case JAM_ALL: return "all";
+        case JAM_BLE_ADV: return "ble-adv";
+        case JAM_ZIGBEE: return "zigbee";
         default: return "all";
     }
 }
@@ -373,6 +380,20 @@ static void jam_ble(void) {
     nrf24_stopConstCarrier(&s_dev);
 }
 
+/* Constant-carrier hop through an explicit channel list (BLE-adv, Zigbee). */
+static const uint8_t k_zigbee[16] = {5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80};
+static void jam_list(const uint8_t *chs, int n) {
+    nrf24_startConstCarrier(&s_dev, NRF24_TX_POWER, chs[0]);
+    int64_t last_feed_us = esp_timer_get_time();
+    int i = 0;
+    while (!s_jam_stop) {
+        nrf24_write_reg(&s_dev, REG_RF_CH, chs[i]);
+        i = (i + 1) % n;
+        if (esp_timer_get_time() - last_feed_us >= JAM_WDT_FEED_US) { vTaskDelay(1); last_feed_us = esp_timer_get_time(); }
+    }
+    nrf24_stopConstCarrier(&s_dev);
+}
+
 static void nrf24_jam_task(void* ctx) {
     (void)ctx;
     s_jam_running = true;
@@ -381,6 +402,8 @@ static void nrf24_jam_task(void* ctx) {
         case JAM_BLE: jam_ble(); break;           /* BLE, adv channels weighted */
         case JAM_BT: jam_sweep(0, 83); break;     /* classic BT band */
         case JAM_WIFI: jam_sweep(1, 84); break;   /* WiFi 2.4 GHz span */
+        case JAM_BLE_ADV: jam_list(ble_adv, 3); break;  /* only adv 2/26/80 */
+        case JAM_ZIGBEE: jam_list(k_zigbee, 16); break; /* 802.15.4 */
         case JAM_DRONE:
         case JAM_ALL:
         default:

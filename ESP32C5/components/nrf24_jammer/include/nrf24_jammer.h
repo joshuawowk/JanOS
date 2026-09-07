@@ -12,6 +12,8 @@ typedef enum {
     JAM_WIFI,      /* sweep across all WiFi channels, packet spam */
     JAM_DRONE,     /* constant-carrier sweep 0..125 */
     JAM_ALL,       /* full 2.4GHz constant-carrier sweep 0..125 (default) */
+    JAM_BLE_ADV,   /* only BLE advertising channels 2/26/80 */
+    JAM_ZIGBEE,    /* 802.15.4 (Zigbee) channels 11-26 */
 } nrf24_jam_band_t;
 
 /* Initialize and probe the single nRF24 module wired to the ESP32-C5.

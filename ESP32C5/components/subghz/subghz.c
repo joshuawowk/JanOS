@@ -38,7 +38,7 @@ static bool s_enabled = true;   /* radio arbiter: false => yield the shared head
 
 /* ---- op management ---- */
 typedef enum { OP_NONE, OP_LISTEN, OP_LISTEN_RAW, OP_JAM, OP_ANALYZER,
-               OP_HUNT, OP_SCANNER, OP_WEATHER } op_t;
+               OP_HUNT, OP_SCANNER, OP_WEATHER, OP_SPECTRUM, OP_BRUTE, OP_JAMDET } op_t;
 static volatile op_t  s_op = OP_NONE;
 static volatile bool  s_op_stop = false;
 static volatile TaskHandle_t s_op_task = NULL;
@@ -380,6 +380,213 @@ static bool has_token(int argc, char **argv, const char *tok) {
 }
 
 /* ---- command handlers ---- */
+
+/* ===================== Ported radio apps (CC1101) ==========================
+ * Spectrum analyzer/waterfall (#8), de Bruijn / brute-force OOK (#9), protocol
+ * TX presets (#10) and an RSSI jamming detector (#11). Ported from Bruce
+ * (rf_spectrum / rf_waterfall / rf_bruteforce / protocols/rf_registry) and
+ * ESP32-DIV (SubBrute / jammingdetector). See docs/radio_apps_port.md.
+ * All emit byte-exact [SUBGHZ_*] tokens the Tab5 parses.
+ * ------------------------------------------------------------------------- */
+
+/* ---- #9/#10 OOK protocol table (signed us: +carrier ON, -carrier OFF) ---- */
+typedef struct { const char *name; int bits; int16_t zero[2], one[2], pre[2], post[2]; } brute_proto_t;
+static const brute_proto_t BRUTE_PROTOS[] = {
+    {"came",        12, {-320,640},  {-640,320},  {-11520,320}, {0,0}},
+    {"nice",        12, {-700,1400}, {-1400,700}, {-25200,700}, {0,0}},
+    {"holtek",      12, {-870,430},  {-430,870},  {-15480,430}, {0,0}},
+    {"ansonic",     12, {-1111,555}, {-555,1111}, {-19425,555}, {0,0}},
+    {"linear",      10, {500,-1500}, {1500,-500}, {0,0},        {500,-21500}},
+    {"chamberlain",  9, {-870,430},  {-430,870},  {0,0},        {-3000,1000}},
+};
+#define BRUTE_PROTOS_N (int)(sizeof(BRUTE_PROTOS)/sizeof(BRUTE_PROTOS[0]))
+
+static int find_brute_proto(const char *name) {
+    for (int i = 0; i < BRUTE_PROTOS_N; i++)
+        if (strcmp(name, BRUTE_PROTOS[i].name) == 0) return i;
+    return -1;
+}
+
+/* Emit one signed-us half-pulse pair by bit-banging GDO0 (ASK async TX). */
+static void ook_emit_pair(int gdo0, const int16_t p[2]) {
+    for (int k = 0; k < 2; k++) {
+        int e = p[k];
+        if (e == 0) continue;
+        gpio_set_level(gdo0, e > 0 ? 1 : 0);
+        esp_rom_delay_us((uint32_t)(e > 0 ? e : -e));
+    }
+}
+static void ook_emit_code(int gdo0, const brute_proto_t *p, uint32_t code, int bits) {
+    ook_emit_pair(gdo0, p->pre);
+    for (int j = bits - 1; j >= 0; j--)
+        ook_emit_pair(gdo0, ((code >> j) & 1) ? p->one : p->zero);
+    ook_emit_pair(gdo0, p->post);
+}
+static void ook_tx_setup(float f) {
+    cc1101_set_idle(&g_subghz_radio);
+    cc1101_set_modulation(&g_subghz_radio, CC1101_MOD_ASK);
+    cc1101_set_ccmode(&g_subghz_radio, false);
+    cc1101_set_frequency(&g_subghz_radio, f);
+    cc1101_set_pa(&g_subghz_radio, 12);
+    gpio_set_direction(g_subghz_radio.gdo0_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(g_subghz_radio.gdo0_pin, 0);
+    cc1101_set_tx(&g_subghz_radio);
+}
+static void ook_tx_teardown(void) {
+    gpio_set_level(g_subghz_radio.gdo0_pin, 0);
+    cc1101_set_idle(&g_subghz_radio);
+    gpio_set_direction(g_subghz_radio.gdo0_pin, GPIO_MODE_INPUT);
+}
+
+/* ---- #8 spectrum analyzer / waterfall ---- */
+static float s_spec_lo = 433.0f, s_spec_hi = 434.0f, s_spec_step = 0.01f;
+static int   s_spec_dwell_ms = 2;
+
+static void spectrum_task(void *pv) {
+    (void)pv;
+    float lo = s_spec_lo, hi = s_spec_hi, step = s_spec_step;
+    if (step < 0.001f) step = 0.001f;
+    if (hi < lo) { float t = lo; lo = hi; hi = t; }
+    int bins = (int)((hi - lo) / step) + 1;
+    if (bins < 1) bins = 1;
+    if (bins > 256) bins = 256;                 /* fits one compact line */
+    static uint8_t data[256];
+    static char hexbuf[513];
+    static const char HEX[] = "0123456789abcdef";
+    cc1101_set_idle(&g_subghz_radio);
+    cc1101_set_modulation(&g_subghz_radio, CC1101_MOD_2FSK);
+    cc1101_set_ccmode(&g_subghz_radio, false);
+    cc1101_set_rxbw(&g_subghz_radio, 200.0f);
+    printf("[SUBGHZ_SPECTRUM_START] lo=%.3f hi=%.3f step=%.4f bins=%d\n", lo, hi, step, bins);
+    fflush(stdout);
+    while (!s_op_stop) {
+        float peak_f = lo; int peak_r = -200;
+        for (int i = 0; i < bins && !s_op_stop; i++) {
+            float f = lo + step * i;
+            cc1101_set_frequency(&g_subghz_radio, f + g_subghz_correction);
+            cc1101_set_rx(&g_subghz_radio);
+            esp_rom_delay_us((uint32_t)s_spec_dwell_ms * 1000);
+            int r = cc1101_get_rssi(&g_subghz_radio);
+            if (r > peak_r) { peak_r = r; peak_f = f; }
+            int b = r + 128; if (b < 0) b = 0; if (b > 255) b = 255;
+            data[i] = (uint8_t)b;
+        }
+        for (int i = 0; i < bins; i++) { hexbuf[2*i] = HEX[data[i] >> 4]; hexbuf[2*i+1] = HEX[data[i] & 0xF]; }
+        hexbuf[2*bins] = 0;
+        printf("[SUBGHZ_SPECTRUM] lo=%.3f step=%.4f n=%d peak=%.3f prssi=%d data=%s\n",
+               lo, step, bins, peak_f, peak_r, hexbuf);
+        fflush(stdout);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (g_subghz_radio_ok) cc1101_set_idle(&g_subghz_radio);
+    worker_exit();
+}
+
+/* ---- #9 de Bruijn / brute-force ---- */
+static int s_brute_proto = 1;   /* default: nice */
+static int s_brute_bits  = 0;   /* 0 => protocol default */
+static int s_brute_reps  = 2;
+
+static void brute_task(void *pv) {
+    (void)pv;
+    const brute_proto_t *p = &BRUTE_PROTOS[s_brute_proto];
+    int bits = s_brute_bits > 0 ? s_brute_bits : p->bits;
+    if (bits > 24) bits = 24;
+    uint32_t total = 1u << bits;
+    int gdo0 = g_subghz_radio.gdo0_pin;
+    ook_tx_setup(subghz_effective_freq());
+    printf("[SUBGHZ_BRUTE_START] proto=%s bits=%d total=%lu freq=%.2f\n",
+           p->name, bits, (unsigned long)total, subghz_effective_freq());
+    fflush(stdout);
+    for (uint32_t code = 0; code < total && !s_op_stop; code++) {
+        for (int r = 0; r < s_brute_reps && !s_op_stop; r++)
+            ook_emit_code(gdo0, p, code, bits);
+        if ((code & 0x3F) == 0) {
+            printf("[SUBGHZ_BRUTE] code=%lu total=%lu\n", (unsigned long)code, (unsigned long)total);
+            fflush(stdout);
+        }
+        vTaskDelay(1);   /* feed WDT + inter-code gap */
+    }
+    ook_tx_teardown();
+    printf("[SUBGHZ_BRUTE_DONE]\n"); fflush(stdout);
+    worker_exit();
+}
+
+/* ---- #11 jamming detector (adaptive floor + duty streak, DIV recipe) ---- */
+static void jamdet_task(void *pv) {
+    (void)pv;
+    float freq = subghz_effective_freq();
+    cc1101_set_idle(&g_subghz_radio);
+    cc1101_set_modulation(&g_subghz_radio, CC1101_MOD_ASK);
+    cc1101_set_ccmode(&g_subghz_radio, false);
+    cc1101_set_rxbw(&g_subghz_radio, 650.0f);
+    cc1101_set_frequency(&g_subghz_radio, freq);
+    cc1101_set_rx(&g_subghz_radio);
+    printf("[SUBGHZ_JAMDET_START] freq=%.2f\n", freq); fflush(stdout);
+    float floor = -95.0f;
+    int64_t streak_us = 0, last_emit = 0;
+    float ring[20]; int rp = 0, rn = 0;
+    const int JD_SAMPLES = 100;
+    while (!s_op_stop) {
+        int64_t t0 = esp_timer_get_time();
+        float busyThresh = floor + 18.0f;
+        if (busyThresh < -75.0f) busyThresh = -75.0f;
+        int busy = 0, mn = 127;
+        for (int i = 0; i < JD_SAMPLES && !s_op_stop; i++) {
+            int r = cc1101_get_rssi(&g_subghz_radio);
+            if (r < mn) mn = r;
+            if ((float)r > busyThresh) busy++;
+            esp_rom_delay_us(200);
+        }
+        float duty = (float)busy / JD_SAMPLES;
+        if (duty < 0.2f) floor = 0.95f * floor + 0.05f * (float)mn;
+        ring[rp] = duty; rp = (rp + 1) % 20; if (rn < 20) rn++;
+        float avg = 0; for (int i = 0; i < rn; i++) avg += ring[i]; avg /= (rn ? rn : 1);
+        int64_t elapsed = esp_timer_get_time() - t0;
+        if (duty >= 0.5f) streak_us += elapsed; else streak_us = 0;
+        bool jam = (streak_us >= 400000) || (avg >= 0.8f);
+        const char *state = jam ? "jammed" : (duty >= 0.1f ? "activity" : "clear");
+        int64_t now = esp_timer_get_time();
+        if (now - last_emit >= 200000) {
+            printf("[SUBGHZ_JAMDET] state=%s duty=%d avg=%d floor=%d\n",
+                   state, (int)(duty * 100), (int)(avg * 100), (int)floor);
+            fflush(stdout);
+            last_emit = now;
+        }
+    }
+    if (g_subghz_radio_ok) cc1101_set_idle(&g_subghz_radio);
+    worker_exit();
+}
+
+/* ---- new command handlers ---- */
+static int cmd_spectrum(int argc, char **argv) {
+    if (argc >= 2) s_spec_lo = strtof(argv[1], NULL);
+    if (argc >= 3) s_spec_hi = strtof(argv[2], NULL);
+    if (argc >= 4) s_spec_step = strtof(argv[3], NULL);
+    if (s_spec_lo <= 0) s_spec_lo = 433.0f;
+    if (s_spec_hi <= 0) s_spec_hi = 434.0f;
+    if (s_spec_step <= 0) s_spec_step = 0.01f;
+    if (!subghz_ensure_radio()) return 0;
+    start_op(OP_SPECTRUM, spectrum_task, "sg_spec", 4096);
+    return 0;
+}
+static int cmd_brute(int argc, char **argv) {
+    if (argc >= 2) { int pi = find_brute_proto(argv[1]); if (pi >= 0) s_brute_proto = pi; }
+    long v;
+    s_brute_bits = 0;
+    if (find_int_token(argc, argv, "bits=", &v)) s_brute_bits = (int)v;
+    if (find_int_token(argc, argv, "reps=", &v) && v > 0) s_brute_reps = (int)v;
+    if (!subghz_ensure_radio()) return 0;
+    start_op(OP_BRUTE, brute_task, "sg_brute", 4096);
+    return 0;
+}
+static int cmd_jamdet(int argc, char **argv) {
+    if (argc >= 2) { float f = strtof(argv[1], NULL); if (f > 0) g_subghz_freq = f; }
+    if (!subghz_ensure_radio()) return 0;
+    start_op(OP_JAMDET, jamdet_task, "sg_jd", 4096);
+    return 0;
+}
+
 static int cmd_freq(int argc, char **argv) {
     if (argc >= 2) { float f = strtof(argv[1], NULL); if (f > 0) g_subghz_freq = f; }
     return 0;
@@ -437,6 +644,27 @@ static int cmd_tx(int argc, char **argv) {
         printf("[SUBGHZ_STATUS] tesla sent\n");
         fflush(stdout);
         return 0;
+    }
+
+    /* protocol TX preset: subghz_tx <proto> code=<n> [bits=<n>] (#10) */
+    if (argc >= 2) {
+        int pi = find_brute_proto(argv[1]);
+        if (pi >= 0) {
+            long code = 0, bv = 0;
+            find_int_token(argc, argv, "code=", &code);
+            int nb = (find_int_token(argc, argv, "bits=", &bv) && bv > 0)
+                       ? (int)bv : BRUTE_PROTOS[pi].bits;
+            if (nb > 32) nb = 32;
+            if (!subghz_ensure_radio()) return 0;
+            subghz_stop_all();
+            int gdo0 = g_subghz_radio.gdo0_pin;
+            ook_tx_setup(subghz_effective_freq());
+            for (int r = 0; r < 3; r++) ook_emit_code(gdo0, &BRUTE_PROTOS[pi], (uint32_t)code, nb);
+            ook_tx_teardown();
+            printf("[SUBGHZ_TX] preset=%s code=%ld bits=%d\n", BRUTE_PROTOS[pi].name, code, nb);
+            fflush(stdout);
+            return 0;
+        }
     }
 
     int idx = (argc >= 2) ? atoi(argv[1]) : 0;
@@ -613,6 +841,9 @@ void subghz_register_commands(void) {
     REG("subghz_status", cmd_status, "Print SubGHz status");
     REG("subghz_weather", cmd_weather, "Receive weather sensors");
     REG("init_cc1101", cmd_init, "Init/detect CC1101");
+    REG("subghz_spectrum", cmd_spectrum, "Spectrum sweep [lo hi step] MHz");
+    REG("subghz_brute", cmd_brute, "OOK brute-force <proto> [bits= reps=]");
+    REG("subghz_jamdet", cmd_jamdet, "Jamming detector [freq]");
 }
 
 void subghz_early_init(void) {

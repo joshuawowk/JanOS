@@ -99,6 +99,7 @@
 #include "sniffer.h"
 #include "oled_display.h"
 #include "nrf24_jammer.h"
+#include "nrf24_apps.h"
 #include "zig_recon.h"
 #include <math.h>
 
@@ -11673,6 +11674,7 @@ static int cmd_stop(int argc, char **argv) {
 
     // Stop nRF24 jammer if running
     nrf24_jammer_stop();
+    nrf24_apps_stop();
 
     // Stop 802.15.4 recon if running
     if (zig_recon_is_active() || current_radio_mode == RADIO_MODE_IEEE802154) {
@@ -21641,8 +21643,10 @@ static int cmd_start_jammer24(int argc, char **argv) {
         else if (strcasecmp(argv[1], "wifi") == 0) band = JAM_WIFI;
         else if (strcasecmp(argv[1], "drone") == 0) band = JAM_DRONE;
         else if (strcasecmp(argv[1], "all") == 0) band = JAM_ALL;
+        else if (strcasecmp(argv[1], "ble-adv") == 0) band = JAM_BLE_ADV;
+        else if (strcasecmp(argv[1], "zigbee") == 0) band = JAM_ZIGBEE;
         else {
-            printf("[NRF24] unknown band '%s' (use ble|bt|wifi|drone|all)\n", argv[1]);
+            printf("[NRF24] unknown band '%s' (use ble|ble-adv|bt|wifi|zigbee|drone|all)\n", argv[1]);
             return 1;
         }
     }
@@ -21657,6 +21661,49 @@ static int cmd_start_jammer24(int argc, char **argv) {
     char line2[24];
     snprintf(line2, sizeof(line2), "  band=%s", name);
     oled_display_update_full("> JAMMING 2.4G", line2, "", "  > stop to end");
+    return 0;
+}
+
+/* ---- ported nRF24 apps: scanner / ESB sniffer / MouseJack (see nrf24_apps.h) ---- */
+static bool nrf24_apps_guard(void) {
+    if (!s_radio_detected) radio_detect();
+    if (s_active_radio == RADIO_CC1101) {
+        printf("[NRF24] not detected - CC1101 is active on the shared radio header\n");
+        fflush(stdout);
+        return false;
+    }
+    return true;
+}
+static int cmd_nrf_scan(int argc, char **argv) {
+    if (!nrf24_apps_guard()) return 0;
+    int lo = 0, hi = 125;
+    if (argc >= 2) lo = atoi(argv[1]);
+    if (argc >= 3) hi = atoi(argv[2]);
+    if (!nrf24_apps_scan_start(lo, hi)) { printf("[NRF_SPECTRUM_ERR] start failed\n"); fflush(stdout); }
+    return 0;
+}
+static int cmd_nrf_esb_scan(int argc, char **argv) {
+    (void)argc; (void)argv;
+    if (!nrf24_apps_guard()) return 0;
+    if (!nrf24_apps_esb_start()) { printf("[NRF_ESB_ERR] start failed\n"); fflush(stdout); }
+    return 0;
+}
+static int cmd_nrf_esb_replay(int argc, char **argv) {
+    (void)argc; (void)argv;
+    if (!nrf24_apps_guard()) return 0;
+    nrf24_apps_esb_replay();
+    return 0;
+}
+static int cmd_nrf_mj_inject(int argc, char **argv) {
+    if (!nrf24_apps_guard()) return 0;
+    if (argc < 4) { printf("[NRF_MJ_ERR] usage: nrf_mj_inject <addrhex10> <ch> <text...>\n"); fflush(stdout); return 0; }
+    int ch = atoi(argv[2]);
+    char text[128]; text[0] = 0;
+    for (int i = 3; i < argc; i++) {
+        strncat(text, argv[i], sizeof(text) - strlen(text) - 1);
+        if (i + 1 < argc) strncat(text, " ", sizeof(text) - strlen(text) - 1);
+    }
+    nrf24_apps_mj_inject(argv[1], ch, text);
     return 0;
 }
 
@@ -22395,6 +22442,42 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&start_jammer24_cmd));
+
+    const esp_console_cmd_t nrf_scan_cmd = {
+        .command = "nrf_scan",
+        .help = "nRF24 2.4GHz scanner/spectrum: nrf_scan [lo] [hi] (channels 0-125)",
+        .hint = "[lo] [hi]",
+        .func = &cmd_nrf_scan,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nrf_scan_cmd));
+
+    const esp_console_cmd_t nrf_esb_scan_cmd = {
+        .command = "nrf_esb_scan",
+        .help = "nRF24 ESB promiscuous sniffer + MouseJack fingerprint",
+        .hint = NULL,
+        .func = &cmd_nrf_esb_scan,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nrf_esb_scan_cmd));
+
+    const esp_console_cmd_t nrf_esb_replay_cmd = {
+        .command = "nrf_esb_replay",
+        .help = "Replay the last ESB packet captured by nrf_esb_scan",
+        .hint = NULL,
+        .func = &cmd_nrf_esb_replay,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nrf_esb_replay_cmd));
+
+    const esp_console_cmd_t nrf_mj_inject_cmd = {
+        .command = "nrf_mj_inject",
+        .help = "MouseJack Logitech keystroke inject: nrf_mj_inject <addrhex10> <ch> <text...>",
+        .hint = "<addrhex10> <ch> <text...>",
+        .func = &cmd_nrf_mj_inject,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&nrf_mj_inject_cmd));
 
     const esp_console_cmd_t wifi_connect_cmd = {
         .command = "wifi_connect",
