@@ -37,6 +37,7 @@
 #include "argtable3/argtable3.h"
 
 #include "driver/uart.h"
+#include "driver/usb_serial_jtag.h"
 #include "driver/sdmmc_host.h"
 #include "driver/sdspi_host.h"
 #include "driver/spi_master.h"
@@ -22983,6 +22984,42 @@ static void register_commands(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&version_cmd));
 }
 
+/* Accept console command lines over the native USB-serial-JTAG (the flashing/USB
+ * port) and run them through the existing esp_console table, so that port doubles
+ * as a console for on-bench diagnostics (nrf24probe, gpiotest, radio, ...) without
+ * moving the UART cable off the Tab5. UART0 stays the primary REPL. */
+static void usbjtag_console_task(void *pv) {
+    (void)pv;
+    static char line[256]; int pos = 0; uint8_t ch;
+    printf("\n[usb]> "); fflush(stdout);
+    for (;;) {
+        int n = usb_serial_jtag_read_bytes(&ch, 1, pdMS_TO_TICKS(100));
+        if (n <= 0) continue;
+        if (ch == '\r' || ch == '\n') {
+            if (pos > 0) {
+                line[pos] = 0; pos = 0;
+                int ret = 0;
+                esp_err_t e = esp_console_run(line, &ret);
+                if (e == ESP_ERR_NOT_FOUND) printf("Unrecognized command: %s\n", line);
+            }
+            printf("\n[usb]> "); fflush(stdout);
+        } else if (ch == 0x08 || ch == 0x7F) {
+            if (pos > 0) pos--;
+        } else if (pos < (int)sizeof(line) - 1) {
+            line[pos++] = (char)ch;
+        }
+    }
+}
+static void usbjtag_console_start(void) {
+    usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+    esp_err_t e = usb_serial_jtag_driver_install(&cfg);
+    if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
+        printf("[CONSOLE] USB-JTAG input unavailable (err=0x%x)\n", e); fflush(stdout); return;
+    }
+    xTaskCreate(usbjtag_console_task, "usbjtag_con", 8192, NULL, 3, NULL);
+    printf("[CONSOLE] USB-serial-JTAG command input active (type commands over the USB port)\n"); fflush(stdout);
+}
+
 void app_main(void) {
 
 
@@ -23166,6 +23203,10 @@ void app_main(void) {
     linenoiseSetHintsCallback((linenoiseHintsCallback *)&janos_console_hint);
 
     ESP_ERROR_CHECK(esp_console_start_repl(repl));
+
+#if defined(CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG)
+    usbjtag_console_start();   /* also accept console commands over the native USB port */
+#endif
     vTaskDelay(pdMS_TO_TICKS(500));
 
     gpio_config_t boot_button_config = {
