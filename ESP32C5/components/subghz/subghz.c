@@ -553,6 +553,7 @@ static void jamdet_task(void *pv) {
             fflush(stdout);
             last_emit = now;
         }
+        vTaskDelay(1);   /* yield: let the REPL set s_op_stop + feed the idle WDT */
     }
     if (g_subghz_radio_ok) cc1101_set_idle(&g_subghz_radio);
     worker_exit();

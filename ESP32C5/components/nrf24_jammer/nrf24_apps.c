@@ -294,9 +294,9 @@ bool nrf24_apps_mj_inject(const char *addr_hex, int ch, const char *text) {
         uint8_t up[10]   = {0x00, 0xC1, 0x00, 0x00, 0,0,0,0,0, 0};
         up[9] = logi_cksum(up, 10);
         mj_send_on_channels(d, addr, ch, down, 10);
-        esp_rom_delay_us(10000);
+        vTaskDelay(pdMS_TO_TICKS(10));   /* yield between keystrokes (~10ms HID spacing) */
         mj_send_on_channels(d, addr, ch, up, 10);
-        esp_rom_delay_us(10000);
+        vTaskDelay(pdMS_TO_TICKS(10));   /* yield between keystrokes (~10ms HID spacing) */
         frames += 2;
     }
     nrf24_set_idle(d);
@@ -327,6 +327,10 @@ bool nrf24_apps_esb_replay(void) {
 }
 
 /* ================= lifecycle ============================================= */
+/* Apps workers run at priority 1 -- BELOW the esp_console REPL (priority 2) -- so on
+ * this single-core part the worker can never preempt nrf24_apps_stop() between its
+ * NULL-check and vTaskDelete, making the plain s_apps_task handling race-free. Do not
+ * raise this above the REPL without adding a critical section (cf. subghz.c s_op_mux). */
 static bool apps_start_task(TaskFunction_t fn, const char *name) {
     if (!nrf24_jammer_ready() && !nrf24_jammer_init()) return false;
     nrf24_apps_stop();
