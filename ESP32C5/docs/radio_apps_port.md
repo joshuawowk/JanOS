@@ -102,3 +102,12 @@ full-ring average; OOK inter-code carrier-off; Tab5 screens cleanup() on re-entr
 
 Verified: both firmwares build clean and flash; C5 boots + auto-detects radio;
 C5<->Tab5 console link confirmed. Live per-tile confirmation needs a screen tap.
+
+## Push 2 additions
+- subghz_jam_sweep [lo hi step] / subghz_jam_keyfob (CC1101 band-sweep + keyfob-hop jammer)
+  -> Tab5 SubGHz jammer screen "Band Sweep" / "Keyfob Hop" buttons.
+- ble_detect (native-BLE tracker/surveillance detector: airtag/findmy/flock/meta/flipper)
+  -> Tab5 "Detectors" tile (repurposed) -> BLE Detectors list screen.
+- Removed the Tesla sub-GHz tool + the old WiFi Deauth/Anti-Surv "Detectors" submenu (operator request, to free UI/RAM).
+- Tab5 fix: SPIRAM internal DMA reserve 32K->24K (this P4 build is at ~91% DIRAM; the added
+  screens pushed the 32K startup reserve past the edge -> boot abort; 24K restores margin).
