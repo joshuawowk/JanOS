@@ -38,7 +38,7 @@ static bool s_enabled = true;   /* radio arbiter: false => yield the shared head
 
 /* ---- op management ---- */
 typedef enum { OP_NONE, OP_LISTEN, OP_LISTEN_RAW, OP_JAM, OP_ANALYZER,
-               OP_HUNT, OP_SCANNER, OP_WEATHER, OP_SPECTRUM, OP_BRUTE, OP_JAMDET } op_t;
+               OP_HUNT, OP_SCANNER, OP_WEATHER, OP_SPECTRUM, OP_BRUTE, OP_JAMDET, OP_JAMSWEEP } op_t;
 static volatile op_t  s_op = OP_NONE;
 static volatile bool  s_op_stop = false;
 static volatile TaskHandle_t s_op_task = NULL;
@@ -592,6 +592,77 @@ static int cmd_jamdet(int argc, char **argv) {
     return 0;
 }
 
+/* ---- #R1 CC1101 band-sweep / keyfob-preset jammer (ported: Flipper jam.cpp
+ * range_jam/hopper_jam + keyfob_list, Bruce sweepBand). Keys an OOK carrier while
+ * hopping across a frequency range or the common keyfob ISM set, to deny a whole
+ * band / frequency-agile receivers whose exact channel is unknown. C5-only. ---- */
+static float s_js_lo = 300.0f, s_js_hi = 348.0f, s_js_step = 1.0f;
+static bool  s_js_keyfob = false;
+static const float JS_KEYFOB[] = { 303.875f, 310.0f, 315.0f, 330.0f, 350.0f, 390.0f, 418.0f, 433.92f, 434.42f };
+#define JS_KEYFOB_N (int)(sizeof(JS_KEYFOB)/sizeof(JS_KEYFOB[0]))
+
+static void jamsweep_key(float mhz) {
+    cc1101_set_frequency(&g_subghz_radio, mhz + g_subghz_correction);
+    cc1101_set_tx(&g_subghz_radio);          /* re-key carrier on the new freq */
+}
+
+static void jamsweep_task(void *pv) {
+    (void)pv;
+    float lo = s_js_lo, hi = s_js_hi, step = s_js_step;
+    if (step < 0.01f) step = 0.01f;
+    if (hi < lo) { float t = lo; lo = hi; hi = t; }
+    cc1101_set_idle(&g_subghz_radio);
+    cc1101_set_modulation(&g_subghz_radio, CC1101_MOD_ASK);
+    cc1101_set_ccmode(&g_subghz_radio, false);
+    cc1101_set_pa(&g_subghz_radio, 12);
+    gpio_set_direction(g_subghz_radio.gdo0_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(g_subghz_radio.gdo0_pin, 1);   /* carrier on (async OOK) */
+    if (s_js_keyfob) printf("[SUBGHZ_JAM_SWEEP_START] mode=keyfob n=%d\n", JS_KEYFOB_N);
+    else             printf("[SUBGHZ_JAM_SWEEP_START] mode=range lo=%.2f hi=%.2f step=%.2f\n", lo, hi, step);
+    fflush(stdout);
+    int64_t feed = esp_timer_get_time();
+    while (!s_op_stop) {
+        if (s_js_keyfob) {
+            for (int i = 0; i < JS_KEYFOB_N && !s_op_stop; i++) {
+                jamsweep_key(JS_KEYFOB[i]);
+                esp_rom_delay_us(3000);
+                if (esp_timer_get_time() - feed >= 500000) { vTaskDelay(1); feed = esp_timer_get_time(); }
+            }
+        } else {
+            for (float f = lo; f <= hi && !s_op_stop; f += step) {
+                jamsweep_key(f);
+                esp_rom_delay_us(2000);
+                if (esp_timer_get_time() - feed >= 500000) { vTaskDelay(1); feed = esp_timer_get_time(); }
+            }
+        }
+    }
+    cc1101_set_idle(&g_subghz_radio);
+    gpio_set_level(g_subghz_radio.gdo0_pin, 0);
+    gpio_set_direction(g_subghz_radio.gdo0_pin, GPIO_MODE_INPUT);
+    printf("[SUBGHZ_JAM_SWEEP_STOP]\n"); fflush(stdout);
+    worker_exit();
+}
+
+static int cmd_jam_sweep(int argc, char **argv) {
+    s_js_keyfob = false;
+    if (argc >= 2) s_js_lo = strtof(argv[1], NULL);
+    if (argc >= 3) s_js_hi = strtof(argv[2], NULL);
+    if (argc >= 4) s_js_step = strtof(argv[3], NULL);
+    if (s_js_lo <= 0) s_js_lo = 300.0f;
+    if (s_js_hi <= 0) s_js_hi = 348.0f;
+    if (s_js_step <= 0) s_js_step = 1.0f;
+    if (!subghz_ensure_radio()) return 0;
+    start_op(OP_JAMSWEEP, jamsweep_task, "sg_jsw", 4096);
+    return 0;
+}
+static int cmd_jam_keyfob(int argc, char **argv) {
+    (void)argc; (void)argv;
+    s_js_keyfob = true;
+    if (!subghz_ensure_radio()) return 0;
+    start_op(OP_JAMSWEEP, jamsweep_task, "sg_jsw", 4096);
+    return 0;
+}
+
 static int cmd_freq(int argc, char **argv) {
     if (argc >= 2) { float f = strtof(argv[1], NULL); if (f > 0) g_subghz_freq = f; }
     return 0;
@@ -849,6 +920,8 @@ void subghz_register_commands(void) {
     REG("subghz_spectrum", cmd_spectrum, "Spectrum sweep [lo hi step] MHz");
     REG("subghz_brute", cmd_brute, "OOK brute-force <proto> [bits= reps=]");
     REG("subghz_jamdet", cmd_jamdet, "Jamming detector [freq]");
+    REG("subghz_jam_sweep", cmd_jam_sweep, "Band-sweep jammer [lo hi step] MHz");
+    REG("subghz_jam_keyfob", cmd_jam_keyfob, "Keyfob-preset hopping jammer");
 }
 
 void subghz_early_init(void) {
