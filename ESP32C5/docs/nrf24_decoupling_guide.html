@@ -1,0 +1,596 @@
+<title>Decouple the nRF24</title>
+<meta name="description" content="An interactive 3D wiring guide for decoupling the nRF24L01+ on the ESP32-C5 swappable radio header — the fix for power-on-reset-then-brownout.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Semi+Condensed:wght@500;600;700&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  :root{
+    --bg:#EAEDF3; --panel:#FFFFFF; --panel-2:#F3F5FA; --raise:#FBFCFE;
+    --ink:#13151D; --ink-soft:#474D5E; --ink-faint:#79808F;
+    --line:#D6DAE6; --line-soft:#E7EAF2;
+    --accent:#5A50E0; --accent-ink:#3B32AC; --accent-bg:#ECEBFB;
+    --pwr:#CE3740;   /* 3V3 / power red */
+    --gnd:#3A404C;   /* GND graphite */
+    --clk:#0C8AA0;   /* SCK / MISO cyan */
+    --mosi:#B96E06;  /* MOSI amber */
+    --ctrl:#2C8E54;  /* CS / CE control green */
+    --cap:#7A4DD6;   /* capacitor violet */
+    --ok:#2C8E54; --warn:#B96E06; --no:#CE3740;
+    --shadow:0 1px 2px rgba(20,22,40,.05),0 10px 30px -16px rgba(20,22,40,.18);
+    --disp:"Saira Semi Condensed",system-ui,sans-serif;
+    --sans:"Hanken Grotesk",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+    --bg:#0B0D14; --panel:#141824; --panel-2:#191E2B; --raise:#1E2432;
+    --ink:#E6E9F2; --ink-soft:#A3AABC; --ink-faint:#6C7488;
+    --line:#28303F; --line-soft:#212836;
+    --accent:#8B82FF; --accent-ink:#B7B0FF; --accent-bg:#1E2036;
+    --pwr:#F0616A; --gnd:#AEB6C6; --clk:#34B4CC; --mosi:#E4A63A; --ctrl:#46C280; --cap:#B49BFF;
+    --ok:#46C280; --warn:#E4A63A; --no:#F0616A;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 34px -18px rgba(0,0,0,.7);
+  }}
+  :root[data-theme="dark"]{
+    --bg:#0B0D14; --panel:#141824; --panel-2:#191E2B; --raise:#1E2432;
+    --ink:#E6E9F2; --ink-soft:#A3AABC; --ink-faint:#6C7488;
+    --line:#28303F; --line-soft:#212836;
+    --accent:#8B82FF; --accent-ink:#B7B0FF; --accent-bg:#1E2036;
+    --pwr:#F0616A; --gnd:#AEB6C6; --clk:#34B4CC; --mosi:#E4A63A; --ctrl:#46C280; --cap:#B49BFF;
+    --ok:#46C280; --warn:#E4A63A; --no:#F0616A;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 12px 34px -18px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+  .spine{max-width:730px}
+  h1,h2,h3{font-family:var(--disp);font-weight:700;line-height:1.05;text-wrap:balance;margin:0}
+  p{margin:0 0 1em}
+  a{color:var(--accent-ink);text-decoration:none;border-bottom:1px solid color-mix(in srgb,var(--accent) 40%,transparent)}
+  code{font-family:var(--mono);font-size:.86em;background:var(--panel-2);border:1px solid var(--line-soft);border-radius:5px;padding:.06em .36em}
+  .eyebrow{font-family:var(--disp);font-weight:600;text-transform:uppercase;letter-spacing:.12em;font-size:.74rem;color:var(--accent-ink)}
+  .faint{color:var(--ink-faint)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+
+  .topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 86%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line-soft)}
+  .topbar .row{display:flex;align-items:center;gap:14px;height:56px}
+  .brand{font-family:var(--disp);font-weight:700;letter-spacing:.02em;font-size:1.02rem;display:flex;align-items:center;gap:9px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-bg)}
+  .brand .slash{color:var(--accent)}
+  .sp{flex:1}
+  .toggle{font-family:var(--mono);font-size:.76rem;color:var(--ink-soft);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:7px 11px;cursor:pointer;display:flex;align-items:center;gap:7px}
+  .toggle:hover{border-color:var(--accent);color:var(--ink)}
+
+  .hero{padding:46px 0 14px}
+  .kick{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+  .chip{font-family:var(--mono);font-size:.72rem;padding:5px 9px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink-soft);white-space:nowrap}
+  .chip b{color:var(--ink);font-weight:700}
+  h1{font-size:clamp(2.3rem,6vw,4rem);letter-spacing:-.015em}
+  h1 .g{color:var(--accent-ink)}
+  .dek{font-size:1.12rem;color:var(--ink-soft);max-width:670px;margin-top:16px}
+  .dek b{color:var(--ink);font-weight:600}
+
+  section{padding:34px 0;border-top:1px solid var(--line-soft)}
+  .sec-head h2{font-size:clamp(1.5rem,3.4vw,2.05rem);letter-spacing:-.01em}
+  .sec-head .lede{color:var(--ink-soft);margin-top:12px;max-width:690px}
+  figure{margin:0}
+  figcaption{font-size:.82rem;color:var(--ink-faint);margin-top:10px;line-height:1.5}
+  svg{display:block;width:100%;height:auto}
+
+  /* ---- 3D viewer ---- */
+  .viewer{margin-top:22px;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--panel);box-shadow:var(--shadow)}
+  .stage{position:relative;width:100%;aspect-ratio:16/10;min-height:340px;background:
+     radial-gradient(120% 100% at 50% 0%, color-mix(in srgb,var(--accent) 8%,var(--panel)) 0%, var(--panel) 60%)}
+  .stage canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+  .stage canvas:active{cursor:grabbing}
+  .lbl{position:absolute;transform:translate(-50%,-50%);font-family:var(--mono);font-size:11px;font-weight:700;
+     padding:2px 6px;border-radius:5px;white-space:nowrap;pointer-events:none;border:1px solid;background:color-mix(in srgb,var(--panel) 82%,transparent);backdrop-filter:blur(2px)}
+  .hint{position:absolute;left:12px;bottom:10px;font-family:var(--mono);font-size:.7rem;color:var(--ink-faint);pointer-events:none}
+  .ctrls{display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2)}
+  .ctrls .grp{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .ctrls .glabel{font-family:var(--mono);font-size:.66rem;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-faint);margin-right:2px}
+  .btn{font-family:var(--mono);font-size:.74rem;color:var(--ink-soft);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 10px;cursor:pointer}
+  .btn:hover{border-color:var(--accent);color:var(--ink)}
+  .btn[aria-pressed="true"]{background:var(--accent-bg);color:var(--accent-ink);border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .btn .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .sp8{flex:1}
+
+  .legend{display:flex;gap:8px;flex-wrap:wrap;margin:16px 0 0}
+  .sig{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.74rem;color:var(--ink-soft);border:1px solid var(--line-soft);border-radius:20px;padding:4px 10px 4px 7px;background:var(--panel)}
+  .sig .sw{width:12px;height:12px;border-radius:3px}
+
+  .two{display:grid;grid-template-columns:1.05fr .95fr;gap:16px;margin-top:20px}
+  @media(max-width:720px){.two{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:14px;padding:18px;background:var(--panel)}
+  .card h3{font-family:var(--disp);font-size:1.12rem;margin:0 0 10px}
+
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:13px;margin-top:20px;background:var(--panel)}
+  table{border-collapse:collapse;width:100%;font-size:.9rem}
+  th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--line-soft);white-space:nowrap;font-variant-numeric:tabular-nums}
+  thead th{font-family:var(--disp);font-weight:600;text-transform:uppercase;letter-spacing:.05em;font-size:.72rem;color:var(--ink-faint);background:var(--panel-2)}
+  tbody tr:last-child td{border-bottom:none}
+  td.wrap-ok{white-space:normal;color:var(--ink-soft);min-width:210px}
+  .pin{font-family:var(--mono);font-weight:700;font-size:.84rem;padding:2px 7px;border-radius:5px;background:var(--panel-2);border:1px solid var(--line-soft)}
+  .pin.pwr{color:var(--pwr)} .pin.gnd{color:var(--gnd)} .pin.clk{color:var(--clk)} .pin.mosi{color:var(--mosi)} .pin.ctrl{color:var(--ctrl)} .pin.cap{color:var(--cap)}
+
+  .note{display:flex;gap:14px;border-radius:13px;padding:16px 18px;margin-top:18px;border:1px solid var(--line);background:var(--panel)}
+  .note .ic{flex:none;width:26px;height:26px;border-radius:7px;display:grid;place-items:center;font-family:var(--disp);font-weight:700;color:#fff;font-size:.9rem}
+  .note.danger{border-color:color-mix(in srgb,var(--no) 45%,var(--line));background:color-mix(in srgb,var(--no) 6%,var(--panel))}
+  .note.danger .ic{background:var(--no)}
+  .note.warn{border-color:color-mix(in srgb,var(--warn) 45%,var(--line));background:color-mix(in srgb,var(--warn) 7%,var(--panel))}
+  .note.warn .ic{background:var(--warn)}
+  .note.ok{border-color:color-mix(in srgb,var(--ok) 45%,var(--line));background:color-mix(in srgb,var(--ok) 6%,var(--panel))}
+  .note.ok .ic{background:var(--ok)}
+  .note h4{font-family:var(--disp);font-weight:700;font-size:1rem;margin:0 0 4px}
+  .note p{font-size:.92rem;color:var(--ink-soft);margin:0}
+  .note b{color:var(--ink)}
+
+  .stack{display:grid;gap:10px;margin-top:18px}
+  .rung{display:grid;grid-template-columns:auto 1fr auto;gap:14px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 16px}
+  .rung .n{font-family:var(--mono);font-weight:700;font-size:.9rem;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:var(--accent-bg);color:var(--accent-ink)}
+  .rung .v{font-family:var(--disp);font-weight:700;font-size:1.15rem}
+  .rung .d{color:var(--ink-soft);font-size:.9rem}
+  .rung .tag{font-family:var(--mono);font-size:.68rem;padding:3px 8px;border-radius:20px;border:1px solid var(--line-soft);color:var(--ink-faint);white-space:nowrap}
+
+  .dd{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:18px}
+  @media(max-width:680px){.dd{grid-template-columns:1fr}}
+  .dd ul{list-style:none;margin:0;padding:0;display:grid;gap:9px}
+  .dd li{display:flex;gap:9px;font-size:.93rem;color:var(--ink-soft)}
+  .dd .k{flex:none;font-family:var(--mono);font-weight:700}
+  .do .k{color:var(--ok)} .dont .k{color:var(--no)}
+  .dd li b{color:var(--ink)}
+
+  .term{background:#0F1426;border:1px solid #242C46;border-radius:14px;overflow:hidden;margin-top:18px}
+  .term .bar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #242C46;background:rgba(0,0,0,.18)}
+  .term .bar .d{width:10px;height:10px;border-radius:50%}
+  .term .bar .t{margin-left:8px;font-family:var(--mono);font-size:.74rem;color:#5C7288}
+  .term pre{margin:0;padding:15px;overflow-x:auto}
+  .term code{font-family:var(--mono);font-size:.82rem;line-height:1.7;color:#C7D0E4;background:none;border:none;padding:0}
+  .term .g{color:#7DEBAB} .term .r{color:#F0616A} .term .d2{color:#5C7288} .term .a{color:#E4A63A}
+
+  footer{border-top:1px solid var(--line);margin-top:20px;padding:30px 0 60px}
+  footer .src{background:var(--panel-2);border:1px solid var(--line-soft);border-radius:13px;padding:18px 20px}
+  footer h4{font-family:var(--disp);font-weight:700;font-size:.92rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-faint);margin:0 0 10px}
+  footer .files{font-family:var(--mono);font-size:.78rem;color:var(--ink-soft);line-height:1.8;word-break:break-word}
+  footer .files b{color:var(--ink)}
+  footer .disc{font-size:.82rem;color:var(--ink-faint);margin-top:14px;max-width:730px}
+  @media(max-width:760px){.hero{padding:30px 0 8px}}
+</style>
+
+<div class="topbar"><div class="wrap row">
+  <span class="brand"><span class="dot"></span>MONSTER<span class="slash">//</span>C5</span>
+  <span class="faint" style="font-family:var(--mono);font-size:.74rem">decoupling</span>
+  <span class="sp"></span>
+  <button class="toggle" id="themeBtn" aria-label="Toggle color theme">&#9686; <span id="themeLabel">Theme</span></button>
+</div></div>
+
+<div class="wrap">
+  <header class="hero">
+    <div class="kick">
+      <span class="chip"><b>nRF24L01+</b> on the shared header</span>
+      <span class="chip">POR&nbsp;0x0E &rarr; 0xFF = brownout</span>
+      <span class="chip">drag the board to rotate</span>
+    </div>
+    <h1>Decouple the nRF24.<br><span class="g">Kill the brownout.</span></h1>
+    <p class="dek">This guide shows, in 3D, exactly where the decoupling capacitors go and how every net on the shared radio header runs &mdash; the <b>stiff 3V3 delivery</b> an nRF24 needs and the <b>bulk cap a PA/LNA module needs</b> to survive its TX current spikes. Heads-up: the specific <code>0x0E&rarr;0xFF</code> drop-out you hit turned out to be a <b>firmware</b> bug (the SD probe freeing the shared SPI2 bus), now fixed &mdash; see <b>What the drop-out was</b> below. The decoupling here is still the right build.</p>
+  </header>
+
+  <!-- 3D VIEWER -->
+  <section style="border-top:none;padding-top:8px">
+    <div class="sec-head spine">
+      <span class="eyebrow">The wiring, in 3D</span>
+      <h2>Every net on the socket.</h2>
+      <p class="lede">Drag to orbit, scroll to zoom. Toggle the module variant, isolate a net, or explode the stack to see the capacitor placement order. The small ceramic sits <b>closest</b> to the module's VCD/GND pins; the bulk cap sits just behind it.</p>
+    </div>
+
+    <div class="viewer">
+      <div class="stage" id="stage">
+        <canvas id="c3d"></canvas>
+        <div class="hint">drag &middot; scroll &middot; touch</div>
+      </div>
+      <div class="ctrls">
+        <div class="grp"><span class="glabel">Variant</span>
+          <button class="btn" id="mBare" aria-pressed="true">Bare nRF24</button>
+          <button class="btn" id="mPa" aria-pressed="false">PA/LNA</button>
+        </div>
+        <div class="grp"><span class="glabel">Isolate net</span>
+          <button class="btn" data-net="all" aria-pressed="true">All</button>
+          <button class="btn" data-net="pwr"><span class="sw" style="background:var(--pwr)"></span>3V3</button>
+          <button class="btn" data-net="gnd"><span class="sw" style="background:var(--gnd)"></span>GND</button>
+          <button class="btn" data-net="spi"><span class="sw" style="background:var(--clk)"></span>SPI</button>
+          <button class="btn" data-net="ctrl"><span class="sw" style="background:var(--ctrl)"></span>CS/CE</button>
+          <button class="btn" data-net="cap"><span class="sw" style="background:var(--cap)"></span>Caps</button>
+        </div>
+        <span class="sp8"></span>
+        <div class="grp">
+          <button class="btn" id="explode" aria-pressed="false">Explode</button>
+          <button class="btn" id="spin" aria-pressed="true">Auto-spin</button>
+          <button class="btn" id="reset">Reset view</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span class="sig"><span class="sw" style="background:var(--pwr)"></span>3V3 power</span>
+      <span class="sig"><span class="sw" style="background:var(--gnd)"></span>GND</span>
+      <span class="sig"><span class="sw" style="background:var(--clk)"></span>SCK / MISO</span>
+      <span class="sig"><span class="sw" style="background:var(--mosi)"></span>MOSI</span>
+      <span class="sig"><span class="sw" style="background:var(--ctrl)"></span>CS / CE (+ pulls)</span>
+      <span class="sig"><span class="sw" style="background:var(--cap)"></span>decoupling caps</span>
+    </div>
+  </section>
+
+  <!-- CAP STACK -->
+  <section>
+    <div class="sec-head spine">
+      <span class="eyebrow">The capacitor stack</span>
+      <h2>Three caps, in parallel, across VCC&ndash;GND.</h2>
+      <p class="lede">All three sit between the module's <b>VCC and GND pins</b> &mdash; not somewhere on the rail, <i>at the module</i>. Each covers a different frequency band; together they hold VCC steady from DC to the RF switching edges.</p>
+    </div>
+
+    <div class="two">
+      <figure class="card">
+        <h3>How they connect</h3>
+        <svg viewBox="0 0 360 210" role="img" aria-label="VCC rail at top, GND rail at bottom; three capacitors 100nF, 10uF and 100uF each connect VCC to GND in parallel, right beside the nRF24 VCC and GND pins.">
+          <!-- rails -->
+          <line x1="20" y1="34" x2="340" y2="34" style="stroke:var(--pwr);stroke-width:3"/>
+          <line x1="20" y1="176" x2="340" y2="176" style="stroke:var(--gnd);stroke-width:3"/>
+          <text x="20" y="24" style="font-family:var(--mono);font-size:11px;fill:var(--pwr);font-weight:700">VCC (3V3)</text>
+          <text x="20" y="196" style="font-family:var(--mono);font-size:11px;fill:var(--gnd);font-weight:700">GND</text>
+          <!-- module pins -->
+          <rect x="300" y="26" width="40" height="16" rx="3" style="fill:var(--panel-2);stroke:var(--pwr)"/>
+          <rect x="300" y="168" width="40" height="16" rx="3" style="fill:var(--panel-2);stroke:var(--gnd)"/>
+          <text x="320" y="38" text-anchor="middle" style="font-family:var(--mono);font-size:9.5px;fill:var(--ink-soft)">VCC</text>
+          <text x="320" y="180" text-anchor="middle" style="font-family:var(--mono);font-size:9.5px;fill:var(--ink-soft)">GND</text>
+          <text x="320" y="112" text-anchor="middle" style="font-family:var(--disp);font-size:12px;fill:var(--ink);font-weight:700">nRF24</text>
+          <!-- caps: three parallel legs -->
+          <g style="font-family:var(--mono);font-size:11px;font-weight:700">
+            <!-- 100nF -->
+            <line x1="90" y1="34" x2="90" y2="92" style="stroke:var(--cap);stroke-width:2"/>
+            <line x1="78" y1="92" x2="102" y2="92" style="stroke:var(--cap);stroke-width:3"/>
+            <line x1="78" y1="100" x2="102" y2="100" style="stroke:var(--cap);stroke-width:3"/>
+            <line x1="90" y1="100" x2="90" y2="176" style="stroke:var(--cap);stroke-width:2"/>
+            <text x="90" y="128" text-anchor="middle" style="fill:var(--cap)">100nF</text>
+            <text x="90" y="142" text-anchor="middle" style="fill:var(--ink-faint);font-weight:400">ceramic</text>
+            <!-- 10uF -->
+            <line x1="170" y1="34" x2="170" y2="92" style="stroke:var(--cap);stroke-width:2"/>
+            <line x1="158" y1="92" x2="182" y2="92" style="stroke:var(--cap);stroke-width:3"/>
+            <line x1="158" y1="100" x2="182" y2="100" style="stroke:var(--cap);stroke-width:3"/>
+            <line x1="170" y1="100" x2="170" y2="176" style="stroke:var(--cap);stroke-width:2"/>
+            <text x="170" y="128" text-anchor="middle" style="fill:var(--cap)">10&micro;F</text>
+            <text x="170" y="142" text-anchor="middle" style="fill:var(--ink-faint);font-weight:400">ceramic</text>
+            <!-- 100uF -->
+            <line x1="250" y1="34" x2="250" y2="90" style="stroke:var(--cap);stroke-width:2"/>
+            <path d="M238 90 h24 M238 90 a12 12 0 0 1 24 0" style="fill:none;stroke:var(--cap);stroke-width:3"/>
+            <line x1="238" y1="102" x2="262" y2="102" style="stroke:var(--cap);stroke-width:3"/>
+            <line x1="250" y1="102" x2="250" y2="176" style="stroke:var(--cap);stroke-width:2"/>
+            <text x="250" y="130" text-anchor="middle" style="fill:var(--cap)">100&micro;F</text>
+            <text x="250" y="144" text-anchor="middle" style="fill:var(--ink-faint);font-weight:400">bulk (PA/LNA)</text>
+          </g>
+        </svg>
+        <figcaption>All three legs bridge the same two rails, mounted at the module. Closest to the pins &rarr; furthest: 100&nbsp;nF, 10&nbsp;&micro;F, 100&nbsp;&micro;F.</figcaption>
+      </figure>
+
+      <div class="card">
+        <h3>Why each value</h3>
+        <div class="stack">
+          <div class="rung"><div class="v" style="color:var(--cap)">100nF</div><div class="d">Ceramic X7R. Kills the <b>high-frequency</b> switching noise from the SPI edges and the RF PLL. Lowest inductance &mdash; so it goes <b>closest</b> to the pins.</div><span class="tag">HF bypass</span></div>
+          <div class="rung"><div class="v" style="color:var(--cap)">10&micro;F</div><div class="d">Ceramic X5R/X7R. Mid-band reservoir for the mode changes (standby&rarr;RX&rarr;TX). Sits just behind the 100&nbsp;nF.</div><span class="tag">mid-band</span></div>
+          <div class="rung"><div class="v" style="color:var(--cap)">100&micro;F</div><div class="d">Low-ESR bulk (electrolytic/tantalum/ceramic). Absorbs the <b>TX current spikes</b> &mdash; the fix for PA/LNA brownout. Required for +PA/LNA, wise for bare.</div><span class="tag">bulk</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE FIX -->
+  <section>
+    <div class="sec-head spine">
+      <span class="eyebrow">What the drop-out was</span>
+      <h2>0x0E &rarr; 0xFF was the shared bus, not the caps.</h2>
+      <p class="lede">Two tells point away from brownout: the reads happen in <b>power-down</b> (sub-&micro;A &mdash; no current spike for a cap to absorb), and the radio <b>recovers on a soft reset</b> that never cycles the always-on 3V3 rail. Primary-source review found the real cause &mdash; and it was firmware, not power.</p>
+    </div>
+
+    <div class="term">
+      <div class="bar"><span class="d" style="background:#F0616A"></span><span class="d" style="background:#E4A63A"></span><span class="d" style="background:#46C280"></span><span class="t">/dev/ttyUSB0 &middot; nrf24probe 2000 &times;5</span></div>
+<pre><code><span class="g">[NRF24-PROBE] 2000kHz  STATUS=0x0E  RF_CH wr0A-&gt;rd0A  wr55-&gt;rd55  PASS</span>   <span class="d2"># POR value, module fresh</span>
+<span class="r">[NRF24-PROBE] 2000kHz  STATUS=0xFF  RF_CH wr0A-&gt;rdFF  wr55-&gt;rdFF  fail</span>   <span class="d2"># browned out</span>
+<span class="r">[NRF24-PROBE] 2000kHz  STATUS=0xFF  ...  fail</span>
+<span class="a"># 0x0E only on the first read after reset  =  it re-powers, works once, sags under load</span></code></pre>
+    </div>
+
+    <div class="note ok"><div class="ic">&#10003;</div><div><h4>Root cause (fixed in firmware)</h4><p><code>init_sd_card()</code> is reachable from ~25 runtime command paths (save / list / wardrive / portal / file ops, and the Tab5's <code>list_dir</code>). On this SD-less board every failing call ran <code>spi_bus_free(SPI2_HOST)</code> &mdash; freeing the bus the radio <b>shares and is actively using</b> &mdash; so MISO read <code>0xFF</code> until the next reset re-ran <code>radio_detect()</code>. Guarded so a live radio's bus is never freed (commit <code>a8ddd33</code>).</p></div></div>
+    <div class="note warn"><div class="ic">&#9889;</div><div><h4>Still decouple &mdash; for TX, not for that symptom</h4><p>Caps could not have fixed the drop-out (those reads draw no current). But a <b>PA/LNA</b> module still browns out on real TX spikes without the <b>100&micro;F bulk</b>, and every module wants the <b>100nF + 10&micro;F at its own pins</b> on a stiff <b>3V3</b> feed (never a GPIO, never 5&nbsp;V). Build the stack below for correctness and TX headroom.</p></div></div>
+  </section>
+
+  <!-- DO / DONT -->
+  <section>
+    <div class="sec-head spine"><span class="eyebrow">Bench rules</span><h2>Do &amp; don't.</h2></div>
+    <div class="dd">
+      <div class="card do"><h3>Do</h3><ul>
+        <li><span class="k">&#10003;</span><span>Mount all caps <b>at the module's VCC/GND pins</b>, shortest possible leads.</span></li>
+        <li><span class="k">&#10003;</span><span>Smallest value <b>closest</b> to the pins (100nF), bulk furthest.</span></li>
+        <li><span class="k">&#10003;</span><span>Feed VCC from the DevKitC <b>3V3</b> pin; one solid GND back to C5 GND.</span></li>
+        <li><span class="k">&#10003;</span><span>Keep the <b>10k pull-up on CS</b> (GPIO3) and <b>4.7k pull-down on CE</b> (GPIO4).</span></li>
+        <li><span class="k">&#10003;</span><span>For PA/LNA: add the <b>100&micro;F</b> bulk; consider a dedicated 3V3 LDO off 5V.</span></li>
+      </ul></div>
+      <div class="card dont"><h3>Don't</h3><ul>
+        <li><span class="k">&times;</span><span>Power VCC from a <b>GPIO</b> or the <b>5V</b> rail.</span></li>
+        <li><span class="k">&times;</span><span>Put the caps out on the rail instead of <b>at the module</b>.</span></li>
+        <li><span class="k">&times;</span><span>Rely on long dupont jumpers for VCC/GND under TX current.</span></li>
+        <li><span class="k">&times;</span><span>Expect a cap to fix an <b>open or resistive</b> VCC joint &mdash; it can't.</span></li>
+        <li><span class="k">&times;</span><span>Socket both radios at once &mdash; one at a time on the shared header.</span></li>
+      </ul></div>
+    </div>
+  </section>
+
+  <!-- PIN & NET TABLE -->
+  <section>
+    <div class="sec-head spine"><span class="eyebrow">The header</span><h2>Pins, nets &amp; the two mandatory pulls.</h2></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Net</th><th>ESP32-C5</th><th>nRF24</th><th class="wrap-ok">Note</th></tr></thead>
+      <tbody id="pintbody"></tbody>
+    </table></div>
+  </section>
+
+  <!-- BOM -->
+  <section>
+    <div class="sec-head spine"><span class="eyebrow">Bill of materials</span><h2>What to add.</h2></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Part</th><th>Qty</th><th class="wrap-ok">Purpose</th></tr></thead>
+      <tbody id="bombody"></tbody>
+    </table></div>
+  </section>
+
+  <footer>
+    <div class="src">
+      <h4>Verified against source</h4>
+      <p class="files">
+        <b>joshuawowk/JanOS</b> &middot; branch <b>feat/radio-apps-port</b> &mdash; ESP32C5/components/nrf24_jammer (pin map, nrf24probe, gpiotest) &middot; docs/radio_apps_port.md &middot; docs/subghz_cc1101.md<br>
+        Pin map: <b>VCC&rarr;3V3, GND, SCK&rarr;GPIO6, MOSI&rarr;GPIO8, MISO&rarr;GPIO5, CSN&rarr;GPIO3 (10k pull-up), CE&rarr;GPIO4 (4.7k pull-down)</b>. Diagnosis from live <code>nrf24probe</code> / <code>gpiotest</code> on <code>/dev/ttyUSB0</code>.
+      </p>
+      <p class="disc">Decoupling values and placement follow standard 3.3&nbsp;V RF-module practice (smallest cap closest, bulk for PA/LNA TX spikes) and pair with the &ldquo;Swappable Radio Header&rdquo; guide. 3.3&nbsp;V only &mdash; both radios die above ~3.6&nbsp;V.</p>
+    </div>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ---------- theme toggle ---------- */
+(function(){
+  var root=document.documentElement, btn=document.getElementById('themeBtn'), lab=document.getElementById('themeLabel');
+  function eff(){var t=root.getAttribute('data-theme'); if(t) return t; try{return matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}catch(e){return 'light';}}
+  function apply(t){root.setAttribute('data-theme',t); lab.textContent=t==='dark'?'Dark':'Light'; try{localStorage.setItem('mc5-dec-theme',t);}catch(e){} rebuildColors&&rebuildColors();}
+  try{var s=localStorage.getItem('mc5-dec-theme'); if(s){apply(s);} else {lab.textContent=eff()==='dark'?'Dark':'Light';}}catch(e){}
+  btn.addEventListener('click',function(){apply(eff()==='dark'?'light':'dark');});
+})();
+
+/* ---------- data: pin table + BOM (verified net list drives the 3D scene) ---------- */
+var PINS=[
+ ['pwr','Power','3V3','VCC','3.3 V only. Feed from the DevKitC 3V3 pin. 100nF+10uF (+100uF PA/LNA) at these pins.'],
+ ['gnd','Ground','GND','GND','One solid, short return to C5 GND. Common star ground for the caps.'],
+ ['clk','Clock','GPIO6','SCK','Shared SPI2 clock.'],
+ ['mosi','Host&rarr;radio','GPIO8','MOSI','Shared SPI2 MOSI.'],
+ ['clk','Radio&rarr;host','GPIO5','MISO','Shared SPI2 MISO. Reads 0xFF when the module is deselected/unpowered.'],
+ ['ctrl','Chip select','GPIO3','CSN','10k pull-UP to 3V3 mandatory (no internal pull; active-low).'],
+ ['ctrl','Chip enable','GPIO4','CE','4.7k pull-DOWN to GND mandatory (beats the ~45k internal pull-up).']
+];
+var BOM=[
+ ['100 nF ceramic (X7R, 0603/through-hole)','1','HF bypass &mdash; mount closest to VCC/GND pins'],
+ ['10 &micro;F ceramic (X5R/X7R)','1','Mid-band reservoir'],
+ ['100 &micro;F low-ESR (electrolytic/tantalum/ceramic)','1','Bulk &mdash; absorbs TX spikes (required for PA/LNA)'],
+ ['10 k&ohm; resistor','1','CS pull-up on GPIO3'],
+ ['4.7 k&ohm; resistor','1','CE pull-down on GPIO4'],
+ ['Carrier/proto board at the socket','1','Holds the caps + pulls right at the module']
+];
+(function(){
+  var tb=document.getElementById('pintbody');
+  PINS.forEach(function(r){var tr=document.createElement('tr');
+    tr.innerHTML='<td class="wrap-ok" style="color:var(--ink);font-weight:600">'+r[1]+'</td>'+
+      '<td><span class="pin '+r[0]+'">'+r[2]+'</span></td>'+
+      '<td><span class="pin '+r[0]+'">'+r[3]+'</span></td>'+
+      '<td class="wrap-ok">'+r[4]+'</td>'; tb.appendChild(tr);});
+  var bb=document.getElementById('bombody');
+  BOM.forEach(function(r){var tr=document.createElement('tr');
+    tr.innerHTML='<td class="wrap-ok" style="color:var(--ink)"><b>'+r[0]+'</b></td><td>'+r[1]+'</td><td class="wrap-ok">'+r[2]+'</td>'; bb.appendChild(tr);});
+})();
+
+/* ---------- 3D wiring scene ---------- */
+var rebuildColors=null;
+(function(){
+  if(!window.THREE){document.getElementById('stage').insertAdjacentHTML('beforeend','<div style="position:absolute;inset:0;display:grid;place-items:center;color:var(--ink-faint);font-family:var(--mono);font-size:.8rem">3D view needs WebGL</div>');return;}
+  var stage=document.getElementById('stage'), canvas=document.getElementById('c3d');
+  function cssv(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+  var COL={pwr:0,gnd:0,clk:0,mosi:0,ctrl:0,cap:0};
+  function refreshCol(){COL.pwr=new THREE.Color(cssv('--pwr'));COL.gnd=new THREE.Color(cssv('--gnd'));COL.clk=new THREE.Color(cssv('--clk'));COL.mosi=new THREE.Color(cssv('--mosi'));COL.ctrl=new THREE.Color(cssv('--ctrl'));COL.cap=new THREE.Color(cssv('--cap'));}
+  refreshCol();
+
+  var renderer=new THREE.WebGLRenderer({canvas:canvas,antialias:true,alpha:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio||1,2));
+  var scene=new THREE.Scene();
+  var camera=new THREE.PerspectiveCamera(42,16/10,0.1,100);
+  var root=new THREE.Group(); scene.add(root);
+
+  // lights
+  scene.add(new THREE.AmbientLight(0xffffff,0.72));
+  var key=new THREE.DirectionalLight(0xffffff,0.9); key.position.set(6,10,7); scene.add(key);
+  var fill=new THREE.DirectionalLight(0x88aaff,0.35); fill.position.set(-6,4,-4); scene.add(fill);
+
+  // net-tagged meshes for isolate/highlight
+  var tagged=[]; // {mesh, net, baseOpacity}
+  function mat(colorHex,opts){opts=opts||{};var m=new THREE.MeshStandardMaterial({color:colorHex,roughness:opts.rough!=null?opts.rough:0.6,metalness:opts.metal!=null?opts.metal:0.15,transparent:true,opacity:1});return m;}
+  function add(mesh,net){mesh.userData.net=net; if(net) tagged.push({m:mesh,net:net}); root.add(mesh); return mesh;}
+
+  // --- ESP32-C5 DevKitC board ---
+  var boardMat=mat(0x1c2740,{rough:0.75,metal:0.2});
+  var board=new THREE.Mesh(new THREE.BoxGeometry(9,0.28,3.4),boardMat); board.position.set(0,0,0); add(board,null);
+  // USB + a couple of chips for flavor
+  var usb=new THREE.Mesh(new THREE.BoxGeometry(0.9,0.5,1.2),mat(0x9aa4b4,{metal:0.7,rough:0.35})); usb.position.set(-4.4,0.32,0); add(usb,null);
+  var soc=new THREE.Mesh(new THREE.BoxGeometry(1.2,0.22,1.2),mat(0x0d1220,{rough:0.5})); soc.position.set(1.2,0.25,0); add(soc,null);
+
+  // header pins on the C5 (right side), each a small gold post
+  var pinGeo=new THREE.CylinderGeometry(0.07,0.07,0.7,12);
+  var goldMat=mat(0xd8a94a,{metal:0.8,rough:0.3});
+  // pin layout: name -> world position on the board edge
+  var C5={};
+  var pinDefs=[['3V3',3.9,'pwr'],['GND',3.35,'gnd'],['G6',2.8,'clk'],['G8',2.25,'mosi'],['G5',1.7,'clk'],['G3',1.15,'ctrl'],['G4',0.6,'ctrl']];
+  pinDefs.forEach(function(d){
+    var x=d[1]-1.6, z=1.4;
+    var p=new THREE.Mesh(pinGeo,goldMat); p.position.set(x,0.45,z); add(p,null);
+    C5[d[0]]={pos:new THREE.Vector3(x,0.75,z), net:d[2]};
+  });
+
+  // --- carrier board over the socket ---
+  var carrier=new THREE.Mesh(new THREE.BoxGeometry(4.2,0.18,3.0),mat(0x203a2a,{rough:0.7})); carrier.position.set(1.3,0.55,-0.2); add(carrier,null);
+
+  // --- nRF24 module (parented to a group so PA/LNA parts toggle) ---
+  var modGroup=new THREE.Group(); root.add(modGroup);
+  var modMat=mat(0x123a6b,{rough:0.55,metal:0.25});
+  var modBody=new THREE.Mesh(new THREE.BoxGeometry(2.6,0.2,3.0),modMat); modBody.position.set(2.0,0.78,-0.2); modGroup.add(modBody);
+  var modChip=new THREE.Mesh(new THREE.BoxGeometry(0.7,0.22,0.7),mat(0x0b0f18,{rough:0.5})); modChip.position.set(1.7,0.98,-0.2); modGroup.add(modChip);
+  var xtal=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.2,0.28),mat(0xb9bfc9,{metal:0.75,rough:0.3})); xtal.position.set(2.4,0.98,0.35); modGroup.add(xtal);
+  // bare antenna trace (meander) as a thin box; PA/LNA gets a can + SMA
+  var ant=new THREE.Mesh(new THREE.BoxGeometry(0.9,0.05,2.2),mat(0xd8a94a,{metal:0.7,rough:0.4})); ant.position.set(3.0,0.9,-0.2); modGroup.add(ant);
+  var paCan=new THREE.Mesh(new THREE.BoxGeometry(1.1,0.5,1.0),mat(0xcfd6e0,{metal:0.85,rough:0.25})); paCan.position.set(2.2,1.13,-0.2); paCan.visible=false; modGroup.add(paCan);
+  var sma=new THREE.Mesh(new THREE.CylinderGeometry(0.18,0.18,0.5,16),mat(0xd8b24a,{metal:0.85,rough:0.25})); sma.rotation.z=Math.PI/2; sma.position.set(3.5,0.95,-0.2); sma.visible=false; modGroup.add(sma);
+
+  // module pad anchor points (where wires + caps land)
+  var MOD={
+    VCC:new THREE.Vector3(0.95,0.9,1.05), GND:new THREE.Vector3(0.95,0.9,0.75),
+    SCK:new THREE.Vector3(0.95,0.9,0.45), MOSI:new THREE.Vector3(0.95,0.9,0.15),
+    MISO:new THREE.Vector3(0.95,0.9,-0.15), CSN:new THREE.Vector3(0.95,0.9,-0.45), CE:new THREE.Vector3(0.95,0.9,-0.75)
+  };
+
+  // --- capacitors across VCC/GND, closest-first ---
+  var caps=[]; // {mesh, net:'cap', explodeY}
+  function makeCap(x,r,h,label,explodeY){
+    var g=new THREE.Group();
+    var body=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,20),mat(cssv('--cap')?0x7a4dd6:0x7a4dd6,{rough:0.45,metal:0.2}));
+    body.position.y=h/2; g.add(body);
+    // two legs
+    var legGeo=new THREE.CylinderGeometry(0.03,0.03,0.5,8), legMat=mat(0xb9bfc9,{metal:0.8,rough:0.3});
+    var l1=new THREE.Mesh(legGeo,legMat); l1.position.set(-r*0.5,-0.2,0); g.add(l1);
+    var l2=new THREE.Mesh(legGeo,legMat); l2.position.set(r*0.5,-0.2,0); g.add(l2);
+    g.position.set(x,0.9,0.9);
+    modGroup.add(g);
+    g.traverse(function(o){if(o.isMesh){o.userData.net='cap'; tagged.push({m:o,net:'cap'});}});
+    caps.push({g:g,baseY:0.9,ex:explodeY});
+    labels.push({el:mkLabel(label,'cap'),pos:new THREE.Vector3(x,0.9+h+0.35,0.9),node:g});
+  }
+
+  // --- wire helper (arced tube) ---
+  var wires=[];
+  function wire(a,b,net){
+    var mid=a.clone().add(b).multiplyScalar(0.5); mid.y+=0.9+Math.min(a.distanceTo(b)*0.12,0.7);
+    var curve=new THREE.QuadraticBezierCurve3(a,mid,b);
+    var geo=new THREE.TubeGeometry(curve,20,0.045,8,false);
+    var m=new THREE.Mesh(geo,mat(COL[net].getHex(),{rough:0.4,metal:0.25}));
+    m.userData.net=net; tagged.push({m:m,net:net}); root.add(m); wires.push({m:m,net:net,a:a,b:b});
+  }
+
+  // --- labels (HTML overlay tracking 3D points) ---
+  var labels=[];
+  function mkLabel(txt,net){
+    var el=document.createElement('div'); el.className='lbl'; el.innerHTML=txt;
+    var c={pwr:'--pwr',gnd:'--gnd',clk:'--clk',mosi:'--mosi',ctrl:'--ctrl',cap:'--cap'}[net]||'--ink-soft';
+    el.style.color='var('+c+')'; el.style.borderColor='color-mix(in srgb,var('+c+') 55%,transparent)';
+    el.dataset.net=net||''; stage.appendChild(el); return el;
+  }
+
+  // build wires per net (VCC, GND, SCK, MOSI, MISO, CSN, CE)
+  wire(C5['3V3'].pos, MOD.VCC.clone(), 'pwr');
+  wire(C5['GND'].pos, MOD.GND.clone(), 'gnd');
+  wire(C5['G6'].pos,  MOD.SCK.clone(), 'clk');
+  wire(C5['G8'].pos,  MOD.MOSI.clone(),'mosi');
+  wire(C5['G5'].pos,  MOD.MISO.clone(),'clk');
+  wire(C5['G3'].pos,  MOD.CSN.clone(), 'ctrl');
+  wire(C5['G4'].pos,  MOD.CE.clone(),  'ctrl');
+
+  // pin labels
+  labels.push({el:mkLabel('3V3','pwr'),pos:C5['3V3'].pos.clone().add(new THREE.Vector3(0,0.15,0))});
+  labels.push({el:mkLabel('GND','gnd'),pos:C5['GND'].pos.clone().add(new THREE.Vector3(0,0.15,0))});
+  labels.push({el:mkLabel('SCK','clk'),pos:MOD.SCK.clone().add(new THREE.Vector3(0.25,0.1,0))});
+  labels.push({el:mkLabel('MOSI','mosi'),pos:MOD.MOSI.clone().add(new THREE.Vector3(0.3,0.1,0))});
+  labels.push({el:mkLabel('MISO','clk'),pos:MOD.MISO.clone().add(new THREE.Vector3(0.3,0.1,0))});
+  labels.push({el:mkLabel('CSN 10k&#8593;','ctrl'),pos:MOD.CSN.clone().add(new THREE.Vector3(0.35,0.1,0))});
+  labels.push({el:mkLabel('CE 4.7k&#8595;','ctrl'),pos:MOD.CE.clone().add(new THREE.Vector3(0.35,0.1,0))});
+  labels.push({el:mkLabel('nRF24','pwr'),pos:new THREE.Vector3(2.0,1.25,-0.2)}); labels[labels.length-1].el.style.color='var(--ink)'; labels[labels.length-1].el.style.borderColor='var(--line)';
+
+  // pull resistors (little boxes near CSN->3V3 and CE->GND)
+  function resistor(a,b,label){
+    var mid=a.clone().add(b).multiplyScalar(0.5); mid.y+=0.35;
+    var g=new THREE.Mesh(new THREE.BoxGeometry(0.5,0.18,0.18),mat(0x8a6a3a,{rough:0.6}));
+    g.position.copy(mid); root.add(g); g.userData.net='ctrl'; tagged.push({m:g,net:'ctrl'});
+    var c1=new THREE.QuadraticBezierCurve3(a,a.clone().lerp(mid,0.5).add(new THREE.Vector3(0,0.2,0)),mid);
+    var c2=new THREE.QuadraticBezierCurve3(mid,mid.clone().lerp(b,0.5).add(new THREE.Vector3(0,0.2,0)),b);
+    [c1,c2].forEach(function(cv){var t=new THREE.Mesh(new THREE.TubeGeometry(cv,12,0.03,6,false),mat(COL.ctrl.getHex(),{rough:0.4}));t.userData.net='ctrl';tagged.push({m:t,net:'ctrl'});root.add(t);});
+    labels.push({el:mkLabel(label,'ctrl'),pos:mid.clone().add(new THREE.Vector3(0,0.25,0))});
+  }
+  resistor(MOD.CSN.clone().add(new THREE.Vector3(0.2,0,0)), C5['3V3'].pos.clone().add(new THREE.Vector3(0,0,-0.4)), '10k pull-up');
+  resistor(MOD.CE.clone().add(new THREE.Vector3(0.2,0,0)),  C5['GND'].pos.clone().add(new THREE.Vector3(0,0,-0.4)), '4.7k pull-down');
+
+  // caps (closest-first along x toward the pins)
+  makeCap(1.05,0.16,0.5,'100nF',0.0);
+  makeCap(1.5,0.22,0.7,'10&micro;F',0.9);
+  makeCap(2.0,0.34,1.0,'100&micro;F',1.9);
+
+  rebuildColors=function(){refreshCol();
+    wires.forEach(function(w){w.m.material.color.copy(COL[w.net]);});
+    // relabel border colors handled via CSS vars already
+  };
+
+  /* ---------- interaction: hand-rolled orbit ---------- */
+  var az=-0.9, el=0.62, rad=13, tAz=az, tEl=el, tRad=rad, dragging=false, px=0, py=0, spin=true;
+  function clampEl(v){return Math.max(0.12,Math.min(1.45,v));}
+  canvas.addEventListener('pointerdown',function(e){dragging=true;px=e.clientX;py=e.clientY;spin=false;setPressed('spin',false);canvas.setPointerCapture(e.pointerId);});
+  canvas.addEventListener('pointermove',function(e){if(!dragging)return;tAz-=(e.clientX-px)*0.01;tEl=clampEl(tEl-(e.clientY-py)*0.01);px=e.clientX;py=e.clientY;});
+  canvas.addEventListener('pointerup',function(e){dragging=false;});
+  canvas.addEventListener('wheel',function(e){e.preventDefault();tRad=Math.max(7,Math.min(22,tRad+(e.deltaY>0?1:-1)*0.9));},{passive:false});
+  var pinch=0;
+  canvas.addEventListener('touchmove',function(e){if(e.touches.length===2){var dx=e.touches[0].clientX-e.touches[1].clientX,dy=e.touches[0].clientY-e.touches[1].clientY;var d=Math.hypot(dx,dy);if(pinch)tRad=Math.max(7,Math.min(22,tRad+(pinch-d)*0.03));pinch=d;e.preventDefault();}},{passive:false});
+  canvas.addEventListener('touchend',function(){pinch=0;});
+
+  var exploded=false, curNet='all';
+  function setPressed(id,v){var b=document.getElementById(id); if(b) b.setAttribute('aria-pressed',v?'true':'false');}
+  document.getElementById('spin').addEventListener('click',function(){spin=!spin;this.setAttribute('aria-pressed',spin?'true':'false');});
+  document.getElementById('reset').addEventListener('click',function(){tAz=-0.9;tEl=0.62;tRad=13;});
+  document.getElementById('explode').addEventListener('click',function(){exploded=!exploded;this.setAttribute('aria-pressed',exploded?'true':'false');});
+  document.getElementById('mBare').addEventListener('click',function(){setVariant(false);});
+  document.getElementById('mPa').addEventListener('click',function(){setVariant(true);});
+  function setVariant(pa){paCan.visible=pa;sma.visible=pa;ant.visible=!pa;setPressed('mBare',!pa);setPressed('mPa',pa);}
+  Array.prototype.forEach.call(document.querySelectorAll('.ctrls .btn[data-net]'),function(b){
+    b.addEventListener('click',function(){curNet=b.getAttribute('data-net');
+      document.querySelectorAll('.ctrls .btn[data-net]').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false');});});
+  });
+  function netVisible(net){
+    if(curNet==='all')return 1;
+    if(curNet==='spi')return (net==='clk'||net==='mosi')?1:0.06;
+    return net===curNet?1:0.06;
+  }
+
+  function resize(){var w=stage.clientWidth,h=stage.clientHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+  window.addEventListener('resize',resize); resize();
+
+  var tmp=new THREE.Vector3();
+  function project(v){tmp.copy(v).applyMatrix4(root.matrixWorld);tmp.project(camera);return tmp;}
+  function frame(){
+    if(spin&&!dragging)tAz+=0.0032;
+    az+=(tAz-az)*0.12; el+=(tEl-el)*0.12; rad+=(tRad-rad)*0.12;
+    camera.position.set(Math.cos(az)*Math.cos(el)*rad, Math.sin(el)*rad+2.2, Math.sin(az)*Math.cos(el)*rad);
+    camera.lookAt(1.2,0.9,-0.1);
+    // explode caps upward
+    caps.forEach(function(c){var ty=c.baseY+(exploded?c.ex:0);c.g.position.y+=(ty-c.g.position.y)*0.15;});
+    root.updateMatrixWorld();
+    // net isolate opacity
+    tagged.forEach(function(t){var o=netVisible(t.net); t.m.material.opacity+=(o-t.m.material.opacity)*0.2;});
+    // labels
+    var w=stage.clientWidth,h=stage.clientHeight;
+    labels.forEach(function(L){var base=L.node?L.node.position.clone().setY(L.node.position.y+0.6):L.pos; var p=project(base);
+      var vis=(p.z<1)&& (curNet==='all'|| L.el.dataset.net===''||netVisible(L.el.dataset.net)>0.5);
+      L.el.style.display=vis?'block':'none';
+      if(vis){L.el.style.left=((p.x*0.5+0.5)*w)+'px';L.el.style.top=((-p.y*0.5+0.5)*h)+'px';}
+    });
+    renderer.render(scene,camera); requestAnimationFrame(frame);
+  }
+  frame();
+})();
+</script>
