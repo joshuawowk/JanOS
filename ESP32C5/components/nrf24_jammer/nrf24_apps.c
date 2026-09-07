@@ -281,11 +281,17 @@ bool nrf24_apps_mj_inject(const char *addr_hex, int ch, const char *text) {
     nrf24_apps_stop();
     nrf24_device_t *d = nrf24_jammer_device();
     uint8_t addr[5];
-    if (strlen(addr_hex) < 10) { printf("[NRF_MJ_ERR] bad addr\n"); fflush(stdout); return false; }
-    for (int i = 0; i < 5; i++) {
-        unsigned b = 0;
-        if (sscanf(addr_hex + 2*i, "%2x", &b) != 1) { printf("[NRF_MJ_ERR] bad addr\n"); fflush(stdout); return false; }
-        addr[i] = (uint8_t)b;
+    if (strcmp(addr_hex, "last") == 0) {
+        if (!s_esb_have) { printf("[NRF_MJ_ERR] no ESB device captured (run nrf_esb_scan first)\n"); fflush(stdout); return false; }
+        memcpy(addr, s_esb_addr, 5);
+        ch = s_esb_ch;
+    } else {
+        if (strlen(addr_hex) < 10) { printf("[NRF_MJ_ERR] bad addr\n"); fflush(stdout); return false; }
+        for (int i = 0; i < 5; i++) {
+            unsigned b = 0;
+            if (sscanf(addr_hex + 2*i, "%2x", &b) != 1) { printf("[NRF_MJ_ERR] bad addr\n"); fflush(stdout); return false; }
+            addr[i] = (uint8_t)b;
+        }
     }
     /* Logitech wake so a sleeping dongle is listening */
     uint8_t wake[10] = {0x00,0x4F,0x00,0x04,0xB0,0x10,0x00,0x00,0x00,0xED};

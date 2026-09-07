@@ -21698,10 +21698,15 @@ static int cmd_nrf_esb_replay(int argc, char **argv) {
 }
 static int cmd_nrf_mj_inject(int argc, char **argv) {
     if (!nrf24_apps_guard()) return 0;
-    if (argc < 4) { printf("[NRF_MJ_ERR] usage: nrf_mj_inject <addrhex10> <ch> <text...>\n"); fflush(stdout); return 0; }
-    int ch = atoi(argv[2]);
+    bool last = (argc >= 2 && strcmp(argv[1], "last") == 0);
+    if ((last && argc < 3) || (!last && argc < 4)) {
+        printf("[NRF_MJ_ERR] usage: nrf_mj_inject <addrhex10> <ch> <text...> | nrf_mj_inject last <text...>\n");
+        fflush(stdout); return 0;
+    }
+    int ch = last ? 0 : atoi(argv[2]);
+    int text_start = last ? 2 : 3;
     char text[128]; text[0] = 0;
-    for (int i = 3; i < argc; i++) {
+    for (int i = text_start; i < argc; i++) {
         strncat(text, argv[i], sizeof(text) - strlen(text) - 1);
         if (i + 1 < argc) strncat(text, " ", sizeof(text) - strlen(text) - 1);
     }
