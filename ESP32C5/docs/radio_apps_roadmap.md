@@ -11,6 +11,8 @@ CC1101_jammer, ESP32Marauder), ranked by value x hardware-feasibility.
 - [x] R1: CC1101 band-sweep + keyfob-preset jammer (subghz_jam_sweep / subghz_jam_keyfob)
 - [x] R3/R4/R10: native-BLE Detector (AirTag/Find-My/Flock ALPR/Meta/Flipper) -> ble_detect + Tab5 Detectors screen
 
+## Memory: RESOLVED — tab_context_t moved to PSRAM (DIRAM 91%->67%), 32K reserve restored; ample headroom for the below.
+
 ## Remaining backlog (ranked; not yet ported)
 - [ ] R2 (HIGH,M) Extended OOK protocol DECODE registry on RX (CAME/Nice/Holtek/Ansonic/Linear/
       Clemsa/Mastercode/GateTX/PhoenixV2 + RcSwitch_1..12) in subghz_decode.c. C5-only, no UI.
