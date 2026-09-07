@@ -25158,6 +25158,16 @@ static esp_err_t init_sd_card(void) {
     if (sd_card_mounted) {
         return ESP_OK;
     }
+    /* The SD card and the CC1101/nRF24 radio share SPI2 and are mutually
+     * exclusive. Once a radio has claimed the bus, probing/mounting the SD
+     * here would call spi_bus_free(SPI2_HOST) (below) on the LIVE radio bus
+     * and kill it -- the radio then reads back 0xFF/0x00 on MISO until the
+     * next reset re-runs radio_detect(). init_sd_card() is reachable from ~25
+     * runtime command paths, so guard the shared bus: report SD unavailable
+     * and never touch the bus while a radio owns it. */
+    if (s_radio_detected && (s_active_radio == RADIO_CC1101 || s_active_radio == RADIO_NRF24)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (sd_last_init_error != ESP_OK) {
         return sd_last_init_error;
     }
@@ -25230,6 +25240,7 @@ static esp_err_t init_sd_card(void) {
         }
         esp_err_t free_ret = spi_bus_free(SPI2_HOST);
         MY_LOG_INFO(TAG, "SD: released SPI2 for shared radio (spi_bus_free=%s)", esp_err_to_name(free_ret));
+        sd_last_init_error = ret;   /* cache: do not re-probe/re-free the shared bus */
         return ret;
     }
     sd_last_init_error = ESP_OK;
