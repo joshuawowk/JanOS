@@ -626,13 +626,13 @@ static void jamsweep_task(void *pv) {
             for (int i = 0; i < JS_KEYFOB_N && !s_op_stop; i++) {
                 jamsweep_key(JS_KEYFOB[i]);
                 esp_rom_delay_us(3000);
-                if (esp_timer_get_time() - feed >= 500000) { vTaskDelay(1); feed = esp_timer_get_time(); }
+                if (esp_timer_get_time() - feed >= 30000) { vTaskDelay(1); feed = esp_timer_get_time(); }
             }
         } else {
             for (float f = lo; f <= hi && !s_op_stop; f += step) {
                 jamsweep_key(f);
                 esp_rom_delay_us(2000);
-                if (esp_timer_get_time() - feed >= 500000) { vTaskDelay(1); feed = esp_timer_get_time(); }
+                if (esp_timer_get_time() - feed >= 30000) { vTaskDelay(1); feed = esp_timer_get_time(); }
             }
         }
     }

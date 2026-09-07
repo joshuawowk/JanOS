@@ -6753,7 +6753,7 @@ static int cmd_start_wardrive_promisc_impl(int argc, char **argv, bool trace_ena
         MY_LOG_INFO(TAG, "Cannot start wardrive promisc while GPS raw reader is running. Use 'stop' first.");
         return 1;
     }
-    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL) {
+    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL || s_ble_detect_active) {
         MY_LOG_INFO(TAG, "Cannot start wardrive promisc while BT scan is running. Use 'stop' first.");
         return 1;
     }
@@ -6967,7 +6967,7 @@ static int cmd_start_antisurveillance(int argc, char **argv) {
         MY_LOG_INFO(TAG, "Cannot start anti-surveillance while wardrive is running. Use 'stop' first.");
         return 1;
     }
-    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL) {
+    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL || s_ble_detect_active) {
         MY_LOG_INFO(TAG, "Cannot start anti-surveillance while a BT scan is running. Use 'stop' first.");
         return 1;
     }
@@ -20795,11 +20795,14 @@ static bool bt_is_samsung_smarttag(const uint8_t *data, uint8_t len)
  * ALPR camera (XUNTONG mfg 0x09C8 / "Penguin-*" name), Meta smart-glasses (service
  * UUIDs), or a Flipper Zero (company 0x0FBA / "Flipper*" name). Ported from
  * ESP32Marauder isFlockCamera/isMetaIdentifier + the existing AirTag matcher. */
-static uint8_t s_bd_seen[64][6];
-static int     s_bd_seen_n = 0;
+#define BD_SEEN_MAX 128
+static uint8_t s_bd_seen[BD_SEEN_MAX][6];
+static int     s_bd_seen_n = 0;   /* total inserts; ring index = n % BD_SEEN_MAX */
 static bool ble_detect_seen(const uint8_t *mac) {
-    for (int i = 0; i < s_bd_seen_n; i++) if (memcmp(s_bd_seen[i], mac, 6) == 0) return true;
-    if (s_bd_seen_n < 64) memcpy(s_bd_seen[s_bd_seen_n++], mac, 6);
+    int have = s_bd_seen_n < BD_SEEN_MAX ? s_bd_seen_n : BD_SEEN_MAX;
+    for (int i = 0; i < have; i++) if (memcmp(s_bd_seen[i], mac, 6) == 0) return true;
+    memcpy(s_bd_seen[s_bd_seen_n % BD_SEEN_MAX], mac, 6);   /* ring: evict oldest when full */
+    s_bd_seen_n++;
     return false;
 }
 static const char *bt_classify_ble(const uint8_t *data, int len, char *name_out, int name_sz) {
@@ -21465,7 +21468,7 @@ static int cmd_scan_bt(int argc, char **argv)
         return 1;
     }
     
-    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL) {
+    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL || s_ble_detect_active) {
         MY_LOG_INFO(TAG, "BLE scan already running. Use 'stop' to stop it first.");
         return 1;
     }
@@ -21539,7 +21542,7 @@ static int cmd_scan_airtag(int argc, char **argv)
         return 1;
     }
     
-    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL) {
+    if (bt_scan_active || bt_airtag_scan_active || bt_scan_task_handle != NULL || s_ble_detect_active) {
         MY_LOG_INFO(TAG, "BLE scan already running. Use 'stop' to stop it first.");
         return 1;
     }
@@ -21905,6 +21908,9 @@ static int cmd_ble_spam(int argc, char **argv) {
 static int cmd_ble_detect(int argc, char **argv) {
     (void)argc; (void)argv;
     if (bt_nimble_init() != ESP_OK) { printf("[BLE_DETECT_ERR] no BLE controller\n"); fflush(stdout); return 0; }
+    if (wardrive_promisc_active || wardrive_active || antisurv_active) {
+        printf("[BLE_DETECT_ERR] stop wardrive/anti-surveillance first (shares the BLE radio)\n"); fflush(stdout); return 0;
+    }
     ble_spam_stop();
     bt_scan_active = false; bt_stop_scan();
     s_bd_seen_n = 0;
