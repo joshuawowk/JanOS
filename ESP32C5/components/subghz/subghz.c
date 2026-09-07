@@ -421,6 +421,7 @@ static void ook_emit_code(int gdo0, const brute_proto_t *p, uint32_t code, int b
     for (int j = bits - 1; j >= 0; j--)
         ook_emit_pair(gdo0, ((code >> j) & 1) ? p->one : p->zero);
     ook_emit_pair(gdo0, p->post);
+    gpio_set_level(gdo0, 0);   /* leave carrier OFF in the inter-code gap */
 }
 static void ook_tx_setup(float f) {
     cc1101_set_idle(&g_subghz_radio);
@@ -470,6 +471,7 @@ static void spectrum_task(void *pv) {
             if (r > peak_r) { peak_r = r; peak_f = f; }
             int b = r + 128; if (b < 0) b = 0; if (b > 255) b = 255;
             data[i] = (uint8_t)b;
+            if ((i & 0x0F) == 0) vTaskDelay(1);   /* yield mid-sweep: WDT + stop latency */
         }
         for (int i = 0; i < bins; i++) { hexbuf[2*i] = HEX[data[i] >> 4]; hexbuf[2*i+1] = HEX[data[i] & 0xF]; }
         hexbuf[2*bins] = 0;
@@ -499,13 +501,14 @@ static void brute_task(void *pv) {
            p->name, bits, (unsigned long)total, subghz_effective_freq());
     fflush(stdout);
     for (uint32_t code = 0; code < total && !s_op_stop; code++) {
-        for (int r = 0; r < s_brute_reps && !s_op_stop; r++)
+        for (int r = 0; r < s_brute_reps && !s_op_stop; r++) {
             ook_emit_code(gdo0, p, code, bits);
+            vTaskDelay(1);   /* yield per rep: feed WDT + let REPL set s_op_stop */
+        }
         if ((code & 0x3F) == 0) {
             printf("[SUBGHZ_BRUTE] code=%lu total=%lu\n", (unsigned long)code, (unsigned long)total);
             fflush(stdout);
         }
-        vTaskDelay(1);   /* feed WDT + inter-code gap */
     }
     ook_tx_teardown();
     printf("[SUBGHZ_BRUTE_DONE]\n"); fflush(stdout);
@@ -525,7 +528,7 @@ static void jamdet_task(void *pv) {
     printf("[SUBGHZ_JAMDET_START] freq=%.2f\n", freq); fflush(stdout);
     float floor = -95.0f;
     int64_t streak_us = 0, last_emit = 0;
-    float ring[20]; int rp = 0, rn = 0;
+    float ring[20] = {0}; int rp = 0;
     const int JD_SAMPLES = 100;
     while (!s_op_stop) {
         int64_t t0 = esp_timer_get_time();
@@ -540,8 +543,8 @@ static void jamdet_task(void *pv) {
         }
         float duty = (float)busy / JD_SAMPLES;
         if (duty < 0.2f) floor = 0.95f * floor + 0.05f * (float)mn;
-        ring[rp] = duty; rp = (rp + 1) % 20; if (rn < 20) rn++;
-        float avg = 0; for (int i = 0; i < rn; i++) avg += ring[i]; avg /= (rn ? rn : 1);
+        ring[rp] = duty; rp = (rp + 1) % 20;
+        float avg = 0; for (int i = 0; i < 20; i++) avg += ring[i]; avg /= 20.0f;
         int64_t elapsed = esp_timer_get_time() - t0;
         if (duty >= 0.5f) streak_us += elapsed; else streak_us = 0;
         bool jam = (streak_us >= 400000) || (avg >= 0.8f);
@@ -577,6 +580,7 @@ static int cmd_brute(int argc, char **argv) {
     s_brute_bits = 0;
     if (find_int_token(argc, argv, "bits=", &v)) s_brute_bits = (int)v;
     if (find_int_token(argc, argv, "reps=", &v) && v > 0) s_brute_reps = (int)v;
+    if (s_brute_reps > 32) s_brute_reps = 32;
     if (!subghz_ensure_radio()) return 0;
     start_op(OP_BRUTE, brute_task, "sg_brute", 4096);
     return 0;
