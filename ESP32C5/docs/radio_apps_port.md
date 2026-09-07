@@ -81,3 +81,24 @@ NimBLE GAP with a rotating random address. Tokens: `[BLE_SPAM_START] type=`,
 `[BLE_SPAM] sent=`, `[BLE_SPAM_STOP] sent=`. Tab5 screen: ble_spam_screen.c.
 Tab5 screens added: nrf_scanner, subghz_spectrum, nrf_esb, subghz_brute,
 subghz_jamdet, ble_spam (+ radio_waterfall widget).
+
+## Final delivered surface (this branch)
+JanOS C5 console commands added:
+- CC1101: subghz_spectrum [lo hi step], subghz_brute <proto> [bits= reps=],
+  subghz_jamdet [freq], subghz_tx <came|nice|holtek|ansonic|linear|chamberlain> code= [bits=].
+- nRF24: nrf_scan [lo hi], nrf_esb_scan, nrf_esb_replay,
+  nrf_mj_inject <addrhex10> <ch> <text...> | nrf_mj_inject last <text...>,
+  start_jammer24 ble|ble-adv|bt|wifi|zigbee|drone|all.
+- Native BLE: ble_spam apple|samsung|google|windows|all.
+
+MonsterC5 Tab5 Radios-submenu tiles added: Sub-GHz, Jammer(7 bands), nRF Scan
+(waterfall + Full/Low/High presets), SG Spectrum (waterfall + 315/433/868/915
+presets), ESB/MJ (device list + Replay + Inject), Brute, Jam Detect, BLE Spam.
+Reusable radio_waterfall spectrogram widget (PSRAM RGB565, scroll-down).
+
+Hardening (from adversarial multi-agent review): jamdet/mj-inject/brute/spectrum
+scheduler yields; nrf_scan endpoint clamps; mj_inject hex validation; jamdet
+full-ring average; OOK inter-code carrier-off; Tab5 screens cleanup() on re-entry.
+
+Verified: both firmwares build clean and flash; C5 boots + auto-detects radio;
+C5<->Tab5 console link confirmed. Live per-tile confirmation needs a screen tap.
