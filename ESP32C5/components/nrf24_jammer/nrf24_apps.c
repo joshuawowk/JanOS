@@ -92,7 +92,7 @@ static void scan_task(void *pv) {
     if (hi > 125) hi = 125;
     if (hi < lo) { int t = lo; lo = hi; hi = t; }
     int n = hi - lo + 1;
-    const int SAMPLES = 16;
+    const int SAMPLES = 4;   /* fewer RPD samples: bit-bang MISO makes reads slow */
     nrf_scan_config(d);
     printf("[NRF_SPECTRUM_START] lo=%d hi=%d n=%d\n", lo, hi, n); fflush(stdout);
     s_apps_running = true;
