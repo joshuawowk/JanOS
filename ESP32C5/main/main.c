@@ -823,6 +823,7 @@ static volatile bool bt_scan_active = false;
 static volatile bool bt_airtag_scan_active = false;
 static TaskHandle_t bt_scan_task_handle = NULL;
 static volatile bool nimble_initialized = false;
+static bool s_ble_detect_active = false;
 
 // BLE device tracking for deduplication
 #define BT_INITIAL_CAPACITY 128
@@ -11677,6 +11678,7 @@ static int cmd_stop(int argc, char **argv) {
     nrf24_jammer_stop();
     nrf24_apps_stop();
     ble_spam_stop();
+    if (s_ble_detect_active) { s_ble_detect_active = false; bt_stop_scan(); }
 
     // Stop 802.15.4 recon if running
     if (zig_recon_is_active() || current_radio_mode == RADIO_MODE_IEEE802154) {
@@ -20788,6 +20790,52 @@ static bool bt_is_samsung_smarttag(const uint8_t *data, uint8_t len)
 /**
  * BLE GAP event callback for scanning
  */
+/* ---- BLE surveillance/tracker classifier (ble_detect mode) ----
+ * Classifies an advertisement as an Apple AirTag/Find-My tracker, a Flock Safety
+ * ALPR camera (XUNTONG mfg 0x09C8 / "Penguin-*" name), Meta smart-glasses (service
+ * UUIDs), or a Flipper Zero (company 0x0FBA / "Flipper*" name). Ported from
+ * ESP32Marauder isFlockCamera/isMetaIdentifier + the existing AirTag matcher. */
+static uint8_t s_bd_seen[64][6];
+static int     s_bd_seen_n = 0;
+static bool ble_detect_seen(const uint8_t *mac) {
+    for (int i = 0; i < s_bd_seen_n; i++) if (memcmp(s_bd_seen[i], mac, 6) == 0) return true;
+    if (s_bd_seen_n < 64) memcpy(s_bd_seen[s_bd_seen_n++], mac, 6);
+    return false;
+}
+static const char *bt_classify_ble(const uint8_t *data, int len, char *name_out, int name_sz) {
+    if (name_out && name_sz) name_out[0] = 0;
+    const char *type = NULL;
+    bool named_flock = false, named_flipper = false;
+    for (int i = 0; i + 1 < len; ) {
+        int adlen = data[i];
+        if (adlen <= 0 || i + 1 + adlen > len) break;
+        int adtype = data[i + 1];
+        const uint8_t *ad = &data[i + 2];
+        int adn = adlen - 1;
+        if (adtype == 0xFF && adn >= 2) {
+            uint16_t cid = (uint16_t)(ad[0] | (ad[1] << 8));
+            if (cid == 0x09C8) type = "flock";
+            else if (cid == 0x0FBA) type = "flipper";
+        } else if ((adtype == 0x02 || adtype == 0x03) && adn >= 2) {
+            for (int j = 0; j + 1 < adn; j += 2) {
+                uint16_t u = (uint16_t)(ad[j] | (ad[j + 1] << 8));
+                if (u == 0xFD44 && !type) type = "findmy";
+                else if (u == 0xFD5F || u == 0xFEB7 || u == 0xFEB8 || u == 0x01AB || u == 0x058E || u == 0x0D53) type = "meta";
+            }
+        } else if ((adtype == 0x08 || adtype == 0x09) && adn > 0 && name_out) {
+            int n = adn < name_sz - 1 ? adn : name_sz - 1;
+            memcpy(name_out, ad, n); name_out[n] = 0;
+            if (strncmp(name_out, "Flipper", 7) == 0) named_flipper = true;
+            if (strncmp(name_out, "Penguin", 7) == 0) named_flock = true;
+        }
+        i += adlen + 1;
+    }
+    if (!type && named_flipper) type = "flipper";
+    if (!type && named_flock)   type = "flock";
+    if (!type && bt_is_airtag_payload(data, (size_t)len)) type = "airtag";
+    return type;
+}
+
 static int bt_gap_event_callback(struct ble_gap_event *event, void *arg)
 {
     if (event->type != BLE_GAP_EVENT_DISC) {
@@ -20817,6 +20865,20 @@ static int bt_gap_event_callback(struct ble_gap_event *event, void *arg)
         return 0;
     }
     
+    /* ble_detect mode: classify surveillance/tracker devices, emit [BLE_DETECT], skip wardrive. */
+    if (s_ble_detect_active) {
+        char dname[32];
+        const char *dtype = bt_classify_ble(desc->data, desc->length_data, dname, sizeof(dname));
+        if (dtype && !ble_detect_seen(desc->addr.val)) {
+            printf("[BLE_DETECT] type=%s mac=%02X:%02X:%02X:%02X:%02X:%02X rssi=%d name=%s\n",
+                   dtype, desc->addr.val[5], desc->addr.val[4], desc->addr.val[3],
+                   desc->addr.val[2], desc->addr.val[1], desc->addr.val[0],
+                   desc->rssi, dname[0] ? dname : "-");
+            fflush(stdout);
+        }
+        return 0;
+    }
+
     // Parse advertising data
     struct ble_hs_adv_fields fields;
     int rc = ble_hs_adv_parse_fields(&fields, desc->data, desc->length_data);
@@ -21840,6 +21902,19 @@ static int cmd_ble_spam(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_ble_detect(int argc, char **argv) {
+    (void)argc; (void)argv;
+    if (bt_nimble_init() != ESP_OK) { printf("[BLE_DETECT_ERR] no BLE controller\n"); fflush(stdout); return 0; }
+    ble_spam_stop();
+    bt_scan_active = false; bt_stop_scan();
+    s_bd_seen_n = 0;
+    s_ble_detect_active = true;
+    int rc = bt_start_scan();
+    printf("[BLE_DETECT_START] rc=%d (airtag/findmy/flock/meta/flipper)\n", rc);
+    fflush(stdout);
+    return 0;
+}
+
 // --- Command registration in esp_console ---
 static void register_commands(void)
 {
@@ -22620,6 +22695,15 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&ble_spam_cmd));
+
+    const esp_console_cmd_t ble_detect_cmd = {
+        .command = "ble_detect",
+        .help = "Detect BLE trackers/surveillance: AirTag/FindMy/Flock/Meta/Flipper",
+        .hint = NULL,
+        .func = &cmd_ble_detect,
+        .argtable = NULL
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&ble_detect_cmd));
 
     const esp_console_cmd_t wifi_connect_cmd = {
         .command = "wifi_connect",
