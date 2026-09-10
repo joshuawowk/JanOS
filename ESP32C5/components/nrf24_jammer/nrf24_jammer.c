@@ -227,6 +227,99 @@ void nrf24_jammer_probe_at_khz(int khz) {
     fflush(stdout);
 }
 
+/* Flexible runtime SPI probe: test many candidate HW-SPI fixes without a reflash.
+ *   khz    : SPI clock in kHz
+ *   miso   : MISO GPIO to route (5=current, 2=native IOMUX MISO for SPI2)
+ *   idelay : input_delay_ns for the device (0 = default)
+ *   flags  : bit0 force esp_rom_gpio_connect_in_signal(miso,spiq_in) after add
+ *            bit1 esp_rom_gpio_pad_select_gpio(miso)+gpio input-enable before route
+ *            bit2 free+reinit the whole SPI2 bus with this miso before add
+ *            bit3 SPI_DEVICE_HALFDUPLEX
+ *            bit4 also re-route SCK/MOSI/CS out signals manually (full manual matrix) */
+void nrf24_jammer_probe_ex(int khz, int miso, int idelay, int flags) {
+    if (!ensure_dev()) return;
+    s_dev.bb_mode = false;   /* force TRUE hardware SPI (bypass any bit-bang fallback) */
+    if (khz <= 0) khz = 1000;
+    if (miso < 0) miso = NRF24_MISO_PIN;
+    uint32_t spiq_in  = spi_periph_signal[NRF24_SPI_HOST].spiq_in;
+    uint32_t spid_out = spi_periph_signal[NRF24_SPI_HOST].spid_out;
+    uint32_t spiclk_out = spi_periph_signal[NRF24_SPI_HOST].spiclk_out;
+    uint32_t spics_out  = spi_periph_signal[NRF24_SPI_HOST].spics_out[0];
+
+    if (s_dev.spi) { spi_bus_remove_device(s_dev.spi); s_dev.spi = NULL; }
+
+    if (flags & 0x04) {
+        spi_bus_free(NRF24_SPI_HOST);
+        spi_bus_config_t bus_cfg = {
+            .mosi_io_num = NRF24_MOSI_PIN, .miso_io_num = miso,
+            .sclk_io_num = NRF24_SCK_PIN, .quadwp_io_num = -1,
+            .quadhd_io_num = -1, .max_transfer_sz = 64,
+        };
+        esp_err_t br = spi_bus_initialize(NRF24_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
+        printf("[SPIFIX] bus reinit miso=%d -> %s\n", miso, esp_err_to_name(br));
+    }
+
+    spi_device_interface_config_t cfg = {
+        .clock_speed_hz = khz * 1000,
+        .mode = 0,
+        .spics_io_num = NRF24_CS_PIN,
+        .queue_size = 1,
+        .command_bits = 0,
+        .address_bits = 0,
+        .input_delay_ns = idelay,
+        .flags = (flags & 0x08) ? SPI_DEVICE_HALFDUPLEX : 0,
+    };
+    if (spi_bus_add_device(NRF24_SPI_HOST, &cfg, &s_dev.spi) != ESP_OK) {
+        printf("[SPIFIX] add_device failed\n"); return;
+    }
+
+    if (flags & 0x20) {
+        /* TRUE hardware-SPI internal loopback on a spare pad (no module): route
+         * spid_out -> pad and spiq_in <- pad, transfer, expect a clean echo. This
+         * proves the SPI2 peripheral shifts+clocks and reads its own input. */
+        int sp = miso;   /* use the pin arg as the scratch loopback pad */
+        esp_rom_gpio_pad_select_gpio((uint32_t)sp);
+        gpio_set_direction((gpio_num_t)sp, GPIO_MODE_INPUT_OUTPUT);
+        esp_rom_gpio_connect_out_signal((uint32_t)sp, spid_out, false, false);
+        esp_rom_gpio_connect_in_signal((uint32_t)sp, spiq_in, false);
+        uint8_t tx[4] = {0xA5, 0x3C, 0x0F, 0xF0};
+        uint8_t rx[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+        spi_transaction_t t = { .length = 32, .rxlength = 32, .tx_buffer = tx, .rx_buffer = rx };
+        esp_err_t tr = spi_device_polling_transmit(s_dev.spi, &t);
+        bool ok = (rx[0]==tx[0]&&rx[1]==tx[1]&&rx[2]==tx[2]&&rx[3]==tx[3]);
+        printf("[SPIFIX] HW-LOOPBACK pad=%d %dkHz  tx=A5 3C 0F F0  rx=%02X %02X %02X %02X  trx=%s  %s\n",
+               sp, khz, rx[0], rx[1], rx[2], rx[3], esp_err_to_name(tr),
+               ok ? "ECHO OK (peripheral healthy)" : "NO ECHO (peripheral not shifting)");
+        fflush(stdout);
+        return;
+    }
+
+    if (flags & 0x02) {
+        esp_rom_gpio_pad_select_gpio((uint32_t)miso);
+        gpio_set_direction((gpio_num_t)miso, GPIO_MODE_INPUT);
+        gpio_set_pull_mode((gpio_num_t)miso, GPIO_FLOATING);
+    }
+    if (flags & 0x10) {
+        esp_rom_gpio_connect_out_signal((uint32_t)NRF24_MOSI_PIN, spid_out, false, false);
+        esp_rom_gpio_connect_out_signal((uint32_t)NRF24_SCK_PIN,  spiclk_out, false, false);
+        esp_rom_gpio_connect_out_signal((uint32_t)NRF24_CS_PIN,   spics_out, false, false);
+    }
+    if (flags & 0x01) {
+        esp_rom_gpio_connect_in_signal((uint32_t)miso, spiq_in, false);
+    }
+
+    uint8_t status = nrf24_status(&s_dev);
+    uint8_t rb1 = 0xAB, rb2 = 0xAB;
+    nrf24_write_reg(&s_dev, REG_RF_CH, 0x0A);
+    nrf24_read_reg(&s_dev, REG_RF_CH, &rb1, 1);
+    nrf24_write_reg(&s_dev, REG_RF_CH, 0x55);
+    nrf24_read_reg(&s_dev, REG_RF_CH, &rb2, 1);
+    printf("[SPIFIX] %4dkHz miso=%d idelay=%d flags=0x%02X  STATUS=0x%02X  RF_CH wr0A->rd%02X wr55->rd%02X  %s\n",
+           khz, miso, idelay, flags, status, rb1, rb2,
+           (rb1 == 0x0A && rb2 == 0x55) ? "PASS" : "fail");
+    fflush(stdout);
+}
+
 /* Bit-banged SPI byte, mode 0 (CPOL0/CPHA0), with a settle delay around every
  * edge so a cap-slowed MISO has time to reach a valid level before we sample. */
 static uint8_t bb_xfer(uint8_t out, int settle_us) {
@@ -305,12 +398,14 @@ bool nrf24_jammer_init(void) {
 
     bool connected = nrf24_check_connected(&s_dev);
     if (!connected && !s_dev.bb_mode) {
-        /* Hardware SPI couldn't read the module. If the MISO line is electrically
-         * slow (RC-loaded net or a weak module output driver), no hardware-SPI
-         * clock is slow enough -- but a bit-banged read that waits for MISO to
-         * settle can still reach the module. Tear down the HW SPI device, switch
-         * the pins to GPIO, and retry in bit-bang mode. Writes (channel hops)
-         * still work through the same path; reads just become slow. */
+        /* Hardware SPI couldn't read the module. On the ESP32-C5 the usual cause
+         * was the peripheral not reaching the header pins (LP/RTC pad mux, DUAL
+         * MISO-as-output, or a bit-bang/SD teardown detaching MOSI/SCK) -- that is
+         * now fixed in nrf24_init() by re-asserting the matrix routing, so this
+         * path should no longer trigger. It is kept as a last-resort safety net:
+         * if a genuinely slow/RC-loaded MISO net ever defeats hardware SPI, a
+         * bit-banged read that waits for MISO to settle can still reach the module.
+         * Tear down the HW SPI device, switch the pins to GPIO, retry bit-banged. */
         if (s_dev.spi) { spi_bus_remove_device(s_dev.spi); s_dev.spi = NULL; }
         s_dev.bb_mode = true;
         s_dev.bb_settle_us = 500;
@@ -326,6 +421,9 @@ bool nrf24_jammer_init(void) {
         ESP_LOGI(TAG, "nRF24 detected on SPI%d (CS=%d, CE=%d)%s",
                  (int)NRF24_SPI_HOST, NRF24_CS_PIN, NRF24_CE_PIN,
                  s_dev.bb_mode ? " [bit-bang]" : "");
+        printf("[NRF24] link=%s (bb_mode=%d)\n",
+               s_dev.bb_mode ? "BIT-BANG-FALLBACK" : "HARDWARE-SPI", (int)s_dev.bb_mode);
+        fflush(stdout);
     } else {
         ESP_LOGW(TAG, "nRF24 not responding (check wiring/power)");
     }

@@ -7,7 +7,9 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_rom_sys.h"
+#include "esp_rom_gpio.h"
 #include "driver/gpio.h"
+#include "soc/spi_periph.h"
 
 #define TAG "nrf24"
 
@@ -62,6 +64,44 @@ bool nrf24_init(nrf24_device_t* device) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_device failed: %s", esp_err_to_name(ret));
         return false;
+    }
+
+    /* --- ESP32-C5 shared-bus / matrix routing hardening ---------------------
+     * On the C5, driving this nRF24 over hardware SPI2 with the radio-header pin
+     * map (MISO=GPIO5, MOSI=GPIO8, SCK=GPIO6, CS=CE-neighbour) failed with a
+     * rock-solid STATUS=0x00 at every clock (2 MHz .. 125 kHz) while a bit-bang
+     * on the SAME pins read the module perfectly -- proving pads+wiring+module
+     * are healthy and the fault was purely in how the peripheral reached the pins.
+     *
+     * Two C5-specific causes conspire (confirmed by on-target probing + IDF source):
+     *   1. GPIO2..GPIO6 are LP/RTC-capable pads; if GPIO5's mux is left in LP/RTC
+     *      or the bus's DUAL detection routes MISO as an *output*, spiq_in reads a
+     *      constant 0 no matter the clock. gpio_reset_pin() forces the pad back to
+     *      HP-digital and drops any lingering output drive; we then re-establish
+     *      the MISO input route + input-enable.
+     *   2. A prior bit-bang fallback (or SD probe) calls gpio_reset_pin() on
+     *      SCK/MOSI/CS, detaching them from the SPI peripheral; spi_bus_add_device
+     *      only (re)routes CS, so MOSI/SCK stay dumb GPIOs and the module never
+     *      gets a clock/command. We re-assert all three output signals here.
+     * This makes hardware SPI read STATUS=0x0E cleanly and stably up to 8 MHz, so
+     * the bit-bang fallback is no longer needed. Idempotent + harmless to repeat. */
+    {
+        uint32_t host = (uint32_t)device->host;
+        /* MISO: clear LP/RTC or DUAL-output state, then route input + enable buffer. */
+        gpio_reset_pin((gpio_num_t)device->miso_pin);
+        gpio_set_direction((gpio_num_t)device->miso_pin, GPIO_MODE_INPUT);   /* fun_ie = 1 */
+        gpio_pullup_dis((gpio_num_t)device->miso_pin);
+        esp_rom_gpio_connect_in_signal((uint32_t)device->miso_pin,
+                                       spi_periph_signal[host].spiq_in, false);
+        /* Outputs: (re)attach the peripheral signals to the header pins. nRF24 is the
+         * sole device on this bus (SD is disabled whenever a radio is present), so it
+         * always occupies CS slot 0 -> spics_out[0]. */
+        esp_rom_gpio_connect_out_signal((uint32_t)device->mosi_pin,
+                                        spi_periph_signal[host].spid_out, false, false);
+        esp_rom_gpio_connect_out_signal((uint32_t)device->sck_pin,
+                                        spi_periph_signal[host].spiclk_out, false, false);
+        esp_rom_gpio_connect_out_signal((uint32_t)device->cs_pin,
+                                        spi_periph_signal[host].spics_out[0], false, false);
     }
 
     device->initialized = true;

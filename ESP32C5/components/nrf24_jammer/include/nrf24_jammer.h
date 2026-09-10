@@ -64,6 +64,9 @@ void nrf24_jammer_probe_at_khz(int khz);
  * line that hardware SPI (even at its min clock) can't. Tears down hardware SPI. */
 void nrf24_jammer_bitbang_probe(int settle_us);
 
+/* Flexible runtime HW-SPI probe for fix bring-up: khz, miso pin, input_delay_ns, flags. */
+void nrf24_jammer_probe_ex(int khz, int miso, int idelay, int flags);
+
 #ifdef __cplusplus
 }
 #endif

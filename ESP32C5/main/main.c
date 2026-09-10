@@ -21684,6 +21684,15 @@ static int cmd_nrf24probe(int argc, char **argv) {
     return 0;
 }
 
+static int cmd_spifix(int argc, char **argv) {
+    int khz    = (argc >= 2 && argv[1]) ? atoi(argv[1]) : 1000;
+    int miso   = (argc >= 3 && argv[2]) ? atoi(argv[2]) : -1;
+    int idelay = (argc >= 4 && argv[3]) ? atoi(argv[3]) : 0;
+    int flags  = (argc >= 5 && argv[4]) ? (int)strtol(argv[4], NULL, 0) : 0;
+    nrf24_jammer_probe_ex(khz, miso, idelay, flags);
+    return 0;
+}
+
 static int cmd_nrf24bb(int argc, char **argv) {
     int us = (argc >= 2 && argv[1] != NULL) ? atoi(argv[1]) : 500;
     nrf24_jammer_bitbang_probe(us);
@@ -22627,6 +22636,14 @@ static void register_commands(void)
         .argtable = NULL
     };
     ESP_ERROR_CHECK(esp_console_cmd_register(&nrf24probe_cmd));
+
+    const esp_console_cmd_t spifix_cmd = {
+        .command = "spifix",
+        .help = "HW-SPI fix bring-up: spifix <khz> <miso> <input_delay_ns> <flags>",
+        .hint = NULL,
+        .func = &cmd_spifix,
+    };
+    ESP_ERROR_CHECK(esp_console_cmd_register(&spifix_cmd));
 
     const esp_console_cmd_t nrf24bb_cmd = {
         .command = "nrf24bb",
