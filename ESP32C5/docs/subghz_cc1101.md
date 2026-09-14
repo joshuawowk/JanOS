@@ -11,22 +11,38 @@ commands, emitting the exact `[SUBGHZ_*]` lines the Tab5 parses.
 | CC1101 pin | ESP32-C5 GPIO | Notes |
 |---|---|---|
 | SCK  | GPIO6  | shared SD SPI2 clock |
-| MOSI (SI) | GPIO7  | shared SD SPI2 MOSI |
-| MISO (SO) | GPIO2  | shared SD SPI2 MISO |
-| CSN  | **GPIO23** | dedicated CC1101 chip-select |
-| GDO0 | **GPIO24** | data I/O (RX capture / TX drive), interrupt-capable |
-| GDO2 | **GPIO5**  | optional (unused by firmware today) |
-| VCC  | 3V3 | 3.3 V only |
-| GND  | GND | |
+| MOSI (SI) | GPIO8  | shared SD SPI2 MOSI (moved off strapping GPIO7) |
+| MISO (SO) | GPIO5  | shared SD SPI2 MISO (moved off strapping GPIO2) |
+| CSN  | **GPIO3** | chip-select — shared swappable radio header (== nRF24 CSN) |
+| GDO0 | **GPIO4** | data I/O (RX capture / TX drive), interrupt-capable — shared header (== nRF24 CE) |
+| GDO2 | disabled (-1) | unused by firmware |
+| VCC  | 3V3 | 3.3 V only (add 100nF at VCC-GND, plus ~10µF bulk) |
+| GND  | GND | needs a solid common ground with the C5 |
 
 Pins are `#define`s at the top of `components/cc1101/include/cc1101.h`
-(`CC1101_PIN_CS/GDO0/GDO2`); change them there if you wire differently.
+(`CC1101_PIN_SCK/MOSI/MISO/CS/GDO0/GDO2`); change them there if you wire differently.
 
-**Do not use** GPIO15–22 (in-package flash + Quad-PSRAM / MSPI bus), GPIO3/GPIO4
-(nRF24 CS/CE), GPIO11/12 (console UART the Tab5 reads), or the strapping pins
-2/7/27/28 for anything else. GPIO5/23/24 were chosen because they are free,
-non-MSPI, non-strapping. The CC1101 coexists with the SD card and the nRF24 on
-SPI2 (each device has its own CS; the IDF driver arbitrates the bus).
+The CC1101 shares ONE **swappable radio header** with the nRF24 jammer: CSN/GDO0 sit
+on the exact pins the nRF24 uses for CSN/CE (GPIO3/GPIO4), so exactly one of the two
+modules is socketed at a time and firmware auto-detects which is present (`radio_detect()`
+in `main.c`). Swap the module with power off, then reboot to re-detect.
+
+**Pin history:** MOSI/MISO were moved **GPIO7→GPIO8** and **GPIO2→GPIO5** because GPIO2/7
+are ESP32-C5 strapping pins whose boot-stabilizing cap RC-limits them to ~250 kHz (too
+slow for SPI). CSN/GDO0 were moved from the old GPIO23/24 onto the shared GPIO3/4 header.
+If you wired to an older revision of this table, re-land MOSI on GPIO8, MISO on GPIO5,
+CSN on GPIO3, GDO0 on GPIO4.
+
+**Do not use** GPIO15–22 (in-package flash + Quad-PSRAM / MSPI bus), GPIO11/12 (console
+UART the Tab5 reads), or the strapping pins 2/7/27/28. GPIO5/6/8 are clean non-strapping
+pads; GPIO3 is boot-safe (its only strap role is an unused SDIO bit) and needs a 10k
+external pull-up (no internal pull on MTMS); GPIO4 needs a 4.7k external pull-down (to
+beat its ~45k internal pull-up). The CC1101 coexists with the SD card on SPI2 (each
+device has its own CS; the IDF driver arbitrates the bus).
+
+**Bring-up tip:** if `CC1101 NOT DETECTED`, the VERSION register reads `0xFF` (MISO stuck
+high / open) or `0x00` (no data). Reads that vary as `0x66/0x99/0xcc/0x33` are SCK
+crosstalk on a floating MISO. A healthy chip reads PARTNUM `0x00` and VERSION `0x14`.
 
 ## Console commands
 
