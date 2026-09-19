@@ -13971,6 +13971,13 @@ static int cmd_start_nmap(int argc, char **argv)
     uint32_t single_ip = 0;
     bool single_host_mode = false;
 
+    // Reset stop flag at the beginning of operation. Host discovery does not
+    // check operation_stop_requested, but the per-host port loop does, so a
+    // stale "stop" left over from a prior scan (the Tab5 sends "stop" when the
+    // results popup is closed) would let discovery find every host yet break
+    // out of every port scan immediately -- reporting "N hosts, 0 open ports".
+    operation_stop_requested = false;
+
     for (int i = 1; i < argc; i++) {
         if (strcasecmp(argv[i], "quick") == 0) {
             port_count = NMAP_PORTS_QUICK;
