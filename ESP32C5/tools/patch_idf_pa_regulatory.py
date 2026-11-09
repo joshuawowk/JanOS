@@ -106,8 +106,14 @@ def expected_generated_c(source: bytes) -> bytes:
 def apply_patch(idf_path: Path) -> str:
     version = idf_version(idf_path)
     if version not in ((6, 0, 0), (6, 0, 1)):
-        raise PatchError(
-            f"only ESP-IDF 6.0.0 and 6.0.1 are supported; found {'.'.join(map(str, version))}"
+        # The PA table rewrite targets the 6.0.0/6.0.1 esp_wifi regulatory layout and
+        # mutates files inside the shared IDF install. On any other IDF (this repo builds
+        # the ESP32-C5 on IDF 6.1) skip it rather than abort: the firmware builds with the
+        # stock IDF regulatory behavior. Re-enable by building on 6.0.0/6.0.1, or extend
+        # this helper once the 6.1 regulatory table layout is validated.
+        return (
+            f"PA regulatory patch: skipped (unsupported ESP-IDF {'.'.join(map(str, version))}; "
+            "only 6.0.0/6.0.1 are patched) -- building with stock IDF regulatory table"
         )
 
     directory = idf_path / "components" / "esp_wifi" / "regulatory"
