@@ -141,11 +141,12 @@ TP-Link_F5F8 (64:57:25:BB:90:6A)
 - **Stop**: Send `stop`.
 
 ### `start_pcap`
-- **Syntax**: `start_pcap [radio|net]`
+- **Syntax**: `start_pcap [radio|net|gateway]`
 - **Description**: Captures WiFi traffic to PCAP file on SD card. Default mode: `radio`.
   - **Radio mode** (linktype 105): Promiscuous mode capturing all management/data/control frames on all channels.
   - **Net mode** (linktype 1): Requires WiFi STA connection. Captures outbound packets and performs ARP spoofing MITM on detected hosts.
-- **Example**: `start_pcap radio` or `start_pcap net`
+  - **Gateway mode** (linktype 1): Compatibility/idempotency helper for Capture Gateway. Prefer `capture_gateway start`, which arms gateway PCAP automatically. `start_pcap gateway` requires an already-active Capture Gateway and is a no-op if that recorder is already armed.
+- **Example**: `start_pcap radio`, `start_pcap net`, or `start_pcap gateway`
 - **Output**:
 ```
 PCAP radio capture started -> /sdcard/lab/pcaps/sniff_1.pcap
@@ -153,16 +154,18 @@ PCAP radio capture started -> /sdcard/lab/pcaps/sniff_1.pcap
 - **On stop**:
 ```
 PCAP saved: /sdcard/lab/pcaps/sniff_1.pcap (1530 frames, 2 drops)
+[PCAP_FINAL] file=... frames=... drops=... drop_alloc=... drop_queue=... drop_write=... rate_queue_drops=... throttle_events=... pause_events=... filter_drops=...
 ```
 - **Error outputs**:
-  - `"Usage: start_pcap radio|net"` (invalid argument)
+  - `"Usage: start_pcap radio|net|gateway"` (invalid argument)
   - `"Not connected to WiFi. Use 'wifi_connect' first."` (net mode, not connected)
+  - `"Capture Gateway is not active. Start it before 'start_pcap gateway'."`
   - `"Failed to initialize SD card: <error>"` (SD init fail)
   - `"Failed to create /sdcard/lab/pcaps directory"` (directory fail)
   - `"Failed to open <filepath> for writing"` (file fail)
-- **Prerequisites**: SD card. For net mode: WiFi connected via `wifi_connect`.
+- **Prerequisites**: SD card. For net mode: WiFi connected via `wifi_connect`. For gateway mode: active Capture Gateway (`capture_gateway start` or `start_rogue_gitm`).
 - **Stop**: Send `stop`.
-- **Notes**: Files are saved at `/sdcard/lab/pcaps/sniff_N.pcap` (N auto-increments).
+- **Notes**: Files are saved at `/sdcard/lab/pcaps/sniff_N.pcap` (N auto-increments) unless `--pcap-name` was set by Capture Gateway / Rogue GITM.
 
 ---
 
@@ -170,9 +173,10 @@ PCAP saved: /sdcard/lab/pcaps/sniff_1.pcap (1530 frames, 2 drops)
 
 ### `start_deauth`
 - **Syntax**: `start_deauth`
-- **Description**: Starts deauth attack on selected networks.
+- **Description**: Starts deauth attack on selected networks. Per-AP: WPA2 (and similar) get classic deauth; WPA3/OWE get Channel Switch Announcement (CSA beacon + CSA action); WPA2/WPA3 mixed gets both. Syntax is unchanged.
 - **Prerequisite**: `select_networks`
 - **Stop**: Send `stop`.
+- **Notes**: Extra lines such as `"CSA: <SSID> ch=X -> decoy Y"` or `"Deauth+CSA: ..."` may appear at start. Completion/stop markers are unchanged.
 
 ### `start_evil_twin`
 - **Syntax**: `start_evil_twin`
@@ -290,6 +294,19 @@ Connect to 'duap' WiFi network to access the captive portal
   - `"AP: Client disconnected - MAC: <MAC>"`
 - **Stop**: Send `stop`.
 
+### `start_rogue_gitm`
+- **Syntax**: `start_rogue_gitm <SSID> <password> [--pcap-name <name>]`
+- **Description**: WPA2 SoftAP mirror plus Capture Gateway (GITM / NAPT + PCAP). Optional same-channel deauth on `select_networks` targets. No captive portal and no `select_html`. Deauth does not hop channels while GITM is active.
+- **Args**: SSID (1-32 chars), password (8-63 chars WPA2), optional `--pcap-name` (same rules as `capture_gateway`).
+- **Prerequisite**: `wifi_connect` with upstream IPv4. Optional `scan_networks` + `select_networks` (every selected AP must be on the STA channel and must not be the STA uplink BSSID).
+- **Output**: Same machine-readable `[CGW]` block as a successful `capture_gateway start` (`active=1`, `capture=active`, … `[CGW] END`), plus human lines such as `Rogue GITM started successfully!`.
+- **Monitor for**: `[CGW]` / `[CGW_CLIENT]` via `capture_gateway status`; deauth runs silently when enabled. Expect `dns=10.42.0.1`, `dns_proxy=on`. PCAP sources should be SoftAP `10.42.0.x` peers (no upstream ARP-spoof; upstream router should not appear as the client's DNS peer).
+- **Errors**:
+  - `"No upstream IPv4 connection. Use 'wifi_connect' first."`
+  - `"Rogue GITM refused: all selected deauth targets must share the upstream STA channel"`
+  - `"Rogue GITM refused: do not select the upstream STA BSSID for deauth"`
+- **Stop**: Send `stop` (finalizes PCAP, stops gateway and deauth). Do not use `capture_gateway stop` while gateway PCAP is armed.
+
 ### `start_portal`
 - **Syntax**: `start_portal <SSID>`
 - **Description**: Open captive portal (no password required to join).
@@ -361,6 +378,66 @@ DHCP IP: 192.168.0.5, Netmask: 255.255.255.0, GW: 192.168.0.1
 ### `wifi_disconnect`
 - **Syntax**: `wifi_disconnect`
 - **Description**: Disconnects from current AP.
+
+---
+
+## JanOS Capture Gateway (GITM)
+
+Authorized APSTA/NAPT gateway that turns JanOS into the IPv4 default route for clients joined to a dedicated SoftAP. Downstream SoftAP traffic is recorded to PCAP before NAPT (client addresses preserved). Product name: **JanOS GITM** (Gate-in-the-Middle). Complements `start_pcap net` (ARP-spoof on an existing LAN); does not decrypt HTTPS/QUIC/VPN.
+
+### `capture_gateway`
+- **Syntax**:
+  - `capture_gateway start <capture_ssid> [capture_password] [--pcap-name <name>]`
+  - `capture_gateway status`
+  - `capture_gateway stop`
+- **Description**: After `wifi_connect` (STA must have IPv4), starts SoftAP on fixed `10.42.0.1/24`, DHCP, DNS proxy (`dns=10.42.0.1` advertised; queries forwarded to upstream resolver), IPv4 NAPT through STA, adaptive aggregate 4096 kbps ceiling, and automatically arms gateway PCAP before reporting ready. Does not wait for a client. Omit password for open SoftAP; supply 8-63 bytes for WPA2-PSK. Channel follows the upstream AP (single radio).
+- **Args**:
+  - `capture_ssid`: 1-32 bytes (quote if it contains spaces)
+  - `capture_password`: optional; empty/open vs 8-63 WPA2-PSK
+  - `--pcap-name <name>`: optional basename under `/sdcard/lab/pcaps`; `.pcap` appended if omitted; safe chars `[A-Za-z0-9._-]`, max 95 incl. extension; never overwrites an existing file. Without it: `sniff_N.pcap`
+- **Examples**:
+  - `capture_gateway start JanOS-Capture`
+  - `capture_gateway start JanOS-Capture correct-horse-battery-staple`
+  - `capture_gateway start "JanOS Lab" "eight char password" --pcap-name office_20260812_143000`
+  - `capture_gateway status`
+- **Prerequisite**: `wifi_connect` with usable IPv4. Upstream subnet must not contain `10.42.0.1`.
+- **Completion marker (start/status)**: exact line `"[CGW] END"` (collect all `[CGW]` / `[CGW_CLIENT]` lines until then). Successful start also prints human `"Capture Gateway ready and recording..."` and a status block with `active=1` and `capture=active`.
+- **Active status example**:
+```
+[CGW] status active=1 upstream=1 napt=1 clients=2 channel=6
+[CGW] ssid=JanOS Lab security=open upstream_ssid=Office WiFi
+[CGW] ap_ip=10.42.0.1 sta_ip=192.168.1.27 dns=10.42.0.1 dns_proxy=on upstream_dns=192.168.1.1
+[CGW] capture=active file=/sdcard/lab/pcaps/iot-lab_20260812_143000.pcap packets=18742 frames=18742 drops=0 file_bytes=9238164
+[CGW] recorder drop_alloc=0 drop_queue=0 drop_write=0 queue_depth=3 queue_capacity=1024 queue_high_water=41
+[CGW] rate_limit_kbps=4096 rate_effective_kbps=2048 adaptive=on throttle_events=3 pause_events=0 rate_queue_depth=27 rate_queue_capacity=1024 rate_queue_drops=0 rate_queue_high_water=545
+[CGW] pcap_scope=softap_10_42 filter_drops=0
+[CGW] client_isolation=off
+[CGW_CLIENT] mac=02:11:22:33:44:55 ip=10.42.0.2
+[CGW_CLIENT] mac=02:AA:BB:CC:DD:EE ip=10.42.0.3
+[CGW] END
+```
+- **Idle status**:
+```
+[CGW] status active=0
+[CGW] END
+```
+- **Parse notes**:
+  - Match prefixes `[CGW] ` and `[CGW_CLIENT] ` only; ignore ESP-IDF/human log lines between them.
+  - On the `ssid=` line, extract `ssid` between `ssid=` and ` security=`, `security` between ` security=` and ` upstream_ssid=`, remainder is `upstream_ssid` (may contain spaces).
+  - Commit the snapshot only on `[CGW] END`. Use 64-bit for `file_bytes`. `frames` is a compatibility alias of `packets`.
+  - `drops>0` = degraded PCAP; `rate_queue_drops>0` = shaping degradation (separate from recorder drops). Passwords are never returned.
+- **Stop**:
+  - While gateway PCAP is armed: send universal `stop` (finalizes writer, emits `[PCAP_FINAL]`, then tears down gateway). Do **not** use `capture_gateway stop` in that state — it refuses with `"Gateway PCAP is active. Use 'stop'..."`.
+  - `capture_gateway stop` only when gateway is up but PCAP is not armed; prints `[CGW] stopped` / `[CGW] END` and keeps STA up.
+- **Error outputs** (representative):
+  - `"Usage: capture_gateway start <capture_ssid> [capture_password] [--pcap-name <name>] | status | stop"`
+  - `"No upstream IPv4 connection. Use 'wifi_connect' first."`
+  - `"Capture SSID must be 1-32 bytes; optional password must be 8-63 bytes"`
+  - `"Capture Gateway is already active"`
+  - `"PCAP name must fit in ... letters, digits, '.', '_' or '-'; paths are not allowed"`
+  - `"Capture Gateway: recorder failed to arm; gateway rolled back"`
+- **Recommended flow**: `wifi_connect ...` → `capture_gateway start ...` → (optional poll `capture_gateway status`) → clients may join anytime → `stop`.
+- **Related**: `start_rogue_gitm` starts the same GITM session with a mandatory WPA2 mirror SSID and optional same-channel deauth. Do not send `start_pcap gateway` after a successful `capture_gateway start`.
 
 ---
 
@@ -508,6 +585,27 @@ F1:2E:71:9F:C8:68  RSSI: -90 dBm  Name: Forerunner 935
 ```
 - **Format**: `<airtag_count>,<smarttag_count>`
 - **Stop**: Send `stop`.
+
+### `start_blespam`
+- **Syntax**: `start_blespam` or `start_blespam [20|50|100|200|500]`
+- **Description**: Mixes Momentum BLE Spam "Apple Action Modal" (Continuity Nearby Action) and "Samsung Watch Pair" (EasySetup Watch) on alternate advertising cycles. Apple keeps one random MAC for the session; Samsung randomizes MAC every packet. Optional delay is the advertising cycle in milliseconds (default 20). Switches the radio to BLE (tears down WiFi).
+- **Start output**:
+```
+BLE spam started (Apple Action Modal + Samsung Watch Pair). Use 'stop' to end.
+```
+- **Periodic output** (about once a second):
+```
+[BLESPAM] packets=42 apple=21 samsung=21 delay=20
+```
+- **Error outputs**:
+  - `"Usage: start_blespam [20|50|100|200|500]"` (invalid or extra arguments)
+  - `"BLE spam already running. Use 'stop' first."`
+  - `"Cannot start BLE spam while BT scan is running. Use 'stop' first."`
+  - `"Cannot start BLE spam while wardrive is running. Use 'stop' first."`
+  - `"Cannot start BLE spam while anti-surveillance is running. Use 'stop' first."`
+  - `"BLE initialization failed"`
+- **Completion marker**: `"BLE spam started (Apple Action Modal + Samsung Watch Pair). Use 'stop' to end."`
+- **Stop**: Send `stop`. Host can also watch `"BLE spam stopped."`
 
 ---
 
@@ -705,8 +803,8 @@ HTML files found on SD card:
 - **Description**: Sets portal HTML directly from command line.
 
 ### `list_dir`
-- **Syntax**: `list_dir [path]`
-- **Description**: Lists files in a directory. Default path: `lab/handshakes`.
+- **Syntax**: `list_dir [path] [-s]`
+- **Description**: Lists files in a directory. Default path: `lab/handshakes`. Add `-s` in any argument position to print each file's decimal byte size before its name.
 - **Example**: `list_dir /sdcard/lab/handshakes`
 - **Output**:
 ```
@@ -716,6 +814,7 @@ Files in /sdcard/lab/handshakes:
 3 AX3_2.4_3C3F64_405785.pcap
 Found 6 file(s) in /sdcard/lab/handshakes
 ```
+- **Size output**: `list_dir -s /sdcard/lab/handshakes` prints file lines as `<index> <size_bytes> <name>`. If the size cannot be read, it prints `0` and keeps the file in the list.
 - **Parse**: Filter `.pcap` files, skip `.hccapx`. Strip extension for display name.
 
 ### `file_delete`
@@ -998,6 +1097,21 @@ ADDR      ROLE         PKTS  RSSI  LAST
 ---
 
 ## Settings
+
+### `sta_mac`
+- **Syntax** (exact forms; no aliases or extra arguments):
+```
+sta_mac status
+sta_mac set factory
+sta_mac set random
+sta_mac set fixed 02:11:22:33:44:55
+```
+- **Description**: Sets the STA MAC boot policy in NVS. `factory` uses the factory STA address; `random` generates one locally administered unicast address per application boot and retains it through Wi-Fi driver reinitialization; `fixed` uses the specified address. SoftAP, BLE and IEEE 802.15.4 identities are unaffected.
+- **Fixed MAC rule**: Exactly six colon-separated hexadecimal octets, with `first_octet & 3 == 2` (locally administered unicast). Invalid syntax or address returns nonzero and does not change NVS.
+- **Persistence**: A successful `set` checks the NVS commit and reports JSON with `schema_version:1`, `record_type:"sta_mac_result"`, `result:"set"`, and `applies_after_reboot:true`. The new policy takes effect only after an application reboot; `set` does not reboot or change the running MAC. A failed write or commit leaves the configured policy unchanged.
+- **Status**: Read-only JSON with `schema_version:1` and `record_type:"sta_mac_status"` includes `configured_mode`, `boot_mode`, `configured_mac`, `effective_boot_mac`, `active_sta_mac`, `record_health`, `identity_ready` and `pending_reboot`. `configured_mode` is `null` if the saved record is invalid or unreadable; `active_sta_mac` is `null` if the Wi-Fi driver is unavailable; status does not initialize it. Missing NVS selects factory, an invalid/future record falls back to factory without a rewrite, and a read I/O error reports `identity_ready:false` and prevents Wi-Fi startup under an unverified identity.
+- **Admission**: `status` works during active or quarantined radio ownership. `set` is refused busy during either state and uses a short serialized legacy transaction when idle.
+- **WPS**: A temporary WPS session MAC is restored to the effective boot MAC, including the cached random identity. Host tests do not prove on-device radio behavior.
 
 ### `channel_time`
 - **Syntax**: `channel_time set <min|max> <ms>` or `channel_time read <min|max>`
