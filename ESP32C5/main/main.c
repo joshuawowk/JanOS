@@ -551,6 +551,10 @@ static portMUX_TYPE pcap_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 #define PCAP_CAPTURE_DIR "/sdcard/lab/pcaps"
 #define PCAP_BASENAME_MAX_LEN 95
 static char pcap_capture_filepath[sizeof(PCAP_CAPTURE_DIR) + PCAP_BASENAME_MAX_LEN + 2];
+// Path under /sdcard (filepath minus the leading "/sdcard/") for host_append_file(),
+// and a flag set when no local SD is present so captures stream to the host (Tab5).
+static char pcap_capture_relpath[sizeof(pcap_capture_filepath)];
+static bool pcap_capture_streaming = false;
 static char pcap_next_basename[PCAP_BASENAME_MAX_LEN + 1];
 static netif_input_fn pcap_original_input = NULL;
 static netif_linkoutput_fn pcap_original_linkoutput = NULL;
@@ -18851,6 +18855,7 @@ static void pcap_abort_start(void)
         heap_caps_free(pcap_stdio_buffer);
         pcap_stdio_buffer = NULL;
     }
+    pcap_capture_streaming = false;
     pcap_capture_mode = PCAP_MODE_NONE;
 }
 
@@ -18968,29 +18973,31 @@ static int cmd_start_pcap(int argc, char **argv) {
                  PCAP_CAPTURE_DIR "/sniff_%d.pcap", file_num);
     }
 
+    // Open a local file if an SD is mounted; otherwise stream to the host (Tab5).
+    // A NULL handle here is the normal no-SD path -- do NOT bail out.
     pcap_capture_file = fopen(pcap_capture_filepath, "wb");
-    if (!pcap_capture_file) {
-        MY_LOG_INFO(TAG, "Failed to open %s for writing", pcap_capture_filepath);
-        return 1;
-    }
+    pcap_capture_streaming = (pcap_capture_file == NULL);
 
-    pcap_stdio_buffer = heap_caps_malloc(PCAP_WRITE_BATCH_SIZE,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (pcap_stdio_buffer == NULL) {
+    if (!pcap_capture_streaming) {
+        // Local SD: large PSRAM write buffer (only valid for a real FILE*).
         pcap_stdio_buffer = heap_caps_malloc(PCAP_WRITE_BATCH_SIZE,
-                                             MALLOC_CAP_8BIT);
-    }
-    if (pcap_stdio_buffer == NULL ||
-        setvbuf(pcap_capture_file, (char *)pcap_stdio_buffer, _IOFBF,
-                PCAP_WRITE_BATCH_SIZE) != 0) {
-        MY_LOG_INFO(TAG, "Failed to allocate/configure PCAP write buffer");
-        if (pcap_stdio_buffer != NULL) {
-            heap_caps_free(pcap_stdio_buffer);
-            pcap_stdio_buffer = NULL;
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (pcap_stdio_buffer == NULL) {
+            pcap_stdio_buffer = heap_caps_malloc(PCAP_WRITE_BATCH_SIZE,
+                                                 MALLOC_CAP_8BIT);
         }
-        fclose(pcap_capture_file);
-        pcap_capture_file = NULL;
-        return 1;
+        if (pcap_stdio_buffer == NULL ||
+            setvbuf(pcap_capture_file, (char *)pcap_stdio_buffer, _IOFBF,
+                    PCAP_WRITE_BATCH_SIZE) != 0) {
+            MY_LOG_INFO(TAG, "Failed to allocate/configure PCAP write buffer");
+            if (pcap_stdio_buffer != NULL) {
+                heap_caps_free(pcap_stdio_buffer);
+                pcap_stdio_buffer = NULL;
+            }
+            fclose(pcap_capture_file);
+            pcap_capture_file = NULL;
+            return 1;
+        }
     }
 
     uint32_t linktype = (mode == PCAP_MODE_RADIO) ? 105 : 1;
@@ -19003,16 +19010,27 @@ static int cmd_start_pcap(int argc, char **argv) {
         .snaplen = 65535,
         .network = linktype
     };
-    size_t header_written = fwrite(&ghdr, 1, sizeof(ghdr), pcap_capture_file);
-    if (header_written != sizeof(ghdr)) {
-        MY_LOG_INFO(TAG, "Failed to write PCAP header to %s", pcap_capture_filepath);
-        fclose(pcap_capture_file);
-        pcap_capture_file = NULL;
-        heap_caps_free(pcap_stdio_buffer);
-        pcap_stdio_buffer = NULL;
-        return 1;
+    size_t header_written = 0;
+    if (pcap_capture_streaming) {
+        // relpath = path under /sdcard (skip the leading "/sdcard/") for
+        // host_append_file(). The first [FILEA] append creates the file host-side;
+        // pcap_writer_task appends each record after it, in UART order.
+        snprintf(pcap_capture_relpath, sizeof(pcap_capture_relpath), "%s",
+                 pcap_capture_filepath + strlen("/sdcard/"));
+        host_append_file(pcap_capture_relpath, &ghdr, sizeof(ghdr));
+        header_written = sizeof(ghdr);
+    } else {
+        header_written = fwrite(&ghdr, 1, sizeof(ghdr), pcap_capture_file);
+        if (header_written != sizeof(ghdr)) {
+            MY_LOG_INFO(TAG, "Failed to write PCAP header to %s", pcap_capture_filepath);
+            fclose(pcap_capture_file);
+            pcap_capture_file = NULL;
+            heap_caps_free(pcap_stdio_buffer);
+            pcap_stdio_buffer = NULL;
+            return 1;
+        }
+        fflush(pcap_capture_file);
     }
-    fflush(pcap_capture_file);
 
     portENTER_CRITICAL(&pcap_stats_lock);
     pcap_capture_frame_count = 0;
@@ -19036,10 +19054,14 @@ static int cmd_start_pcap(int argc, char **argv) {
                                      sizeof(pcap_queued_frame_t *));
     if (!pcap_packet_queue) {
         MY_LOG_INFO(TAG, "Failed to create PCAP packet queue");
-        fclose(pcap_capture_file);
-        pcap_capture_file = NULL;
-        heap_caps_free(pcap_stdio_buffer);
-        pcap_stdio_buffer = NULL;
+        if (pcap_capture_file) {
+            fclose(pcap_capture_file);
+            pcap_capture_file = NULL;
+        }
+        if (pcap_stdio_buffer != NULL) {
+            heap_caps_free(pcap_stdio_buffer);
+            pcap_stdio_buffer = NULL;
+        }
         return 1;
     }
 
@@ -30568,6 +30590,52 @@ static void pcap_writer_task(void *param) {
                 .incl_len = frame->len,
                 .orig_len = frame->len
             };
+            if (pcap_capture_streaming) {
+                // No local SD: stream the record header then payload as [FILEA]
+                // append frames (in UART order), host (Tab5) writes the file.
+                host_append_file(pcap_capture_relpath, &rec, sizeof(rec));
+                host_append_file(pcap_capture_relpath, frame->data, frame->len);
+                heap_caps_free(frame);
+                portENTER_CRITICAL(&pcap_stats_lock);
+                pcap_capture_frame_count++;
+                portEXIT_CRITICAL(&pcap_stats_lock);
+            } else {
+                size_t record_bytes = fwrite(&rec, 1, sizeof(rec), pcap_capture_file);
+                size_t payload_bytes = fwrite(frame->data, 1, frame->len, pcap_capture_file);
+                heap_caps_free(frame);
+                portENTER_CRITICAL(&pcap_stats_lock);
+                pcap_capture_file_byte_count += record_bytes + payload_bytes;
+                if (record_bytes == sizeof(rec) && payload_bytes == rec.incl_len) {
+                    pcap_capture_frame_count++;
+                } else {
+                    pcap_capture_drop_count++;
+                    pcap_capture_drop_write_count++;
+                }
+                portEXIT_CRITICAL(&pcap_stats_lock);
+                flush_counter++;
+                if (flush_counter >= 512) {
+                    fflush(pcap_capture_file);
+                    flush_counter = 0;
+                }
+            }
+        }
+    }
+
+    while (xQueueReceive(pcap_packet_queue, &frame, 0) == pdTRUE) {
+        pcap_record_header_t rec = {
+            .ts_sec  = (uint32_t)(frame->timestamp_us / 1000000),
+            .ts_usec = (uint32_t)(frame->timestamp_us % 1000000),
+            .incl_len = frame->len,
+            .orig_len = frame->len
+        };
+        if (pcap_capture_streaming) {
+            host_append_file(pcap_capture_relpath, &rec, sizeof(rec));
+            host_append_file(pcap_capture_relpath, frame->data, frame->len);
+            heap_caps_free(frame);
+            portENTER_CRITICAL(&pcap_stats_lock);
+            pcap_capture_frame_count++;
+            portEXIT_CRITICAL(&pcap_stats_lock);
+        } else {
             size_t record_bytes = fwrite(&rec, 1, sizeof(rec), pcap_capture_file);
             size_t payload_bytes = fwrite(frame->data, 1, frame->len, pcap_capture_file);
             heap_caps_free(frame);
@@ -30580,41 +30648,17 @@ static void pcap_writer_task(void *param) {
                 pcap_capture_drop_write_count++;
             }
             portEXIT_CRITICAL(&pcap_stats_lock);
-            flush_counter++;
-            if (flush_counter >= 512) {
-                fflush(pcap_capture_file);
-                flush_counter = 0;
-            }
         }
     }
 
-    while (xQueueReceive(pcap_packet_queue, &frame, 0) == pdTRUE) {
-        pcap_record_header_t rec = {
-            .ts_sec  = (uint32_t)(frame->timestamp_us / 1000000),
-            .ts_usec = (uint32_t)(frame->timestamp_us % 1000000),
-            .incl_len = frame->len,
-            .orig_len = frame->len
-        };
-        size_t record_bytes = fwrite(&rec, 1, sizeof(rec), pcap_capture_file);
-        size_t payload_bytes = fwrite(frame->data, 1, frame->len, pcap_capture_file);
-        heap_caps_free(frame);
-        portENTER_CRITICAL(&pcap_stats_lock);
-        pcap_capture_file_byte_count += record_bytes + payload_bytes;
-        if (record_bytes == sizeof(rec) && payload_bytes == rec.incl_len) {
-            pcap_capture_frame_count++;
-        } else {
-            pcap_capture_drop_count++;
-            pcap_capture_drop_write_count++;
+    if (!pcap_capture_streaming) {
+        fflush(pcap_capture_file);
+        fclose(pcap_capture_file);
+        pcap_capture_file = NULL;
+        if (pcap_stdio_buffer != NULL) {
+            heap_caps_free(pcap_stdio_buffer);
+            pcap_stdio_buffer = NULL;
         }
-        portEXIT_CRITICAL(&pcap_stats_lock);
-    }
-
-    fflush(pcap_capture_file);
-    fclose(pcap_capture_file);
-    pcap_capture_file = NULL;
-    if (pcap_stdio_buffer != NULL) {
-        heap_caps_free(pcap_stdio_buffer);
-        pcap_stdio_buffer = NULL;
     }
     sd_sync();
 
@@ -32143,20 +32187,30 @@ static int find_next_pcap_file_number(void) {
 
 // Save evil twin password to SD card
 static evil_twin_save_status_t save_evil_twin_password(const char* ssid, const char* password) {
-    // Initialize SD card if not already mounted
+    // Mount a local SD if the board has one. On a board with no SD (e.g. MonsterC5)
+    // the mount/stat fails and we fall back to streaming the append to the host
+    // (Tab5), which writes /sdcard/lab/eviltwin.txt for us. Do NOT bail out here.
     esp_err_t ret = init_sd_card();
-    if (ret != ESP_OK) {
-        MY_LOG_INFO(TAG, "Failed to initialize SD card for password logging: %s", esp_err_to_name(ret));
-        return EVIL_TWIN_SAVE_ERROR;
-    }
-    
-    // Check if /sdcard directory is accessible
     struct stat st;
-    if (stat("/sdcard", &st) != 0) {
-        MY_LOG_INFO(TAG, "Error: /sdcard directory not accessible");
-        return EVIL_TWIN_SAVE_ERROR;
+    bool have_sd = (ret == ESP_OK) && (stat("/sdcard", &st) == 0);
+
+    if (!have_sd) {
+        // No local SD: build the CSV line and stream the append to the host. The
+        // fopen("r") dedup below only works with a real SD, so it is skipped here.
+        char et_line[512];
+        int et_len = snprintf(et_line, sizeof(et_line), "\"%s\", \"%s\"\n", ssid, password);
+        if (et_len < 0) {
+            return EVIL_TWIN_SAVE_ERROR;
+        }
+        if (et_len > (int)sizeof(et_line) - 1) {
+            et_len = (int)sizeof(et_line) - 1;
+        }
+        host_append_file("lab/eviltwin.txt", et_line, (size_t)et_len);
+        sd_sync();
+        MY_LOG_INFO(TAG, "Password saved to eviltwin.txt (host stream)");
+        return EVIL_TWIN_SAVE_SAVED;
     }
-    
+
     // Check for duplicate before writing
     char match_line[256];
     snprintf(match_line, sizeof(match_line), "\"%s\", \"%s\"", ssid, password);
