@@ -15,10 +15,12 @@
 #include "esp_wifi_driver.h"
 #include "esp_wps.h"
 
-#if ESP_IDF_VERSION_MAJOR != JANOS_WPS_IDF_MAJOR || \
-    ESP_IDF_VERSION_MINOR != JANOS_WPS_IDF_MINOR || \
-    ESP_IDF_VERSION_PATCH < JANOS_WPS_IDF_PATCH_MIN || \
-    ESP_IDF_VERSION_PATCH > JANOS_WPS_IDF_PATCH_MAX
+/* Josh fork builds the ESP32-C5 on ESP-IDF 6.1; upstream wrote this private-API
+ * adapter for 6.0.0/6.0.1. Allow 6.1 through the guard so the build exercises the
+ * real 6.1 private WiFi API and reports any actual mismatch, instead of pre-empting
+ * it with #error. (If 6.1 proves incompatible, this falls back to an inert stub.) */
+#if !(ESP_IDF_VERSION_MAJOR == 6 && \
+      (ESP_IDF_VERSION_MINOR == 0 || ESP_IDF_VERSION_MINOR == 1))
 #error "JanOS WPS private API adapter does not support this ESP-IDF version"
 #endif
 

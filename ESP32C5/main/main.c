@@ -8527,6 +8527,99 @@ static void hs_sanitize_ssid(char *out, const char *in, size_t out_size) {
     }
 }
 
+
+/* ===== Josh no-SD streaming reroute helpers (re-applied on top of the upstream
+ * storage refactor). The C5 has no SD, so captures/logs stream to the Tab5 over
+ * UART. host_save_file()/host_append_file() write a local SD if present, else
+ * stream [FILEX]/[FILEA] frames the Tab5 parses. Used by wardrive/KML/portal/loot
+ * sites here, and (next) wired into the upstream pcap/handshake/evil-twin paths. */
+/* ---- Generic storage reroute -----------------------------------------------
+ * This board has no SD, so files are streamed to the host (Tab5), which stores
+ * them under /sdcard/<relpath>. Two host-side frames:
+ *   whole file : [FILEX name=<relpath> size=<n>] [FILED]<b64>.. [FILEX-END sum=<hex>]
+ *   append     : [FILEA name=<relpath>]<b64>   (one line per <=48B chunk, ordered)
+ * host_save_file()/host_append_file() write to a local SD if one is mounted, and
+ * fall back to streaming otherwise -- so the same call works with or without an
+ * SD on the board. */
+static void host_stream_file(const char *relpath, const uint8_t *data, size_t len) {
+    printf("[FILEX name=%s size=%u]\n", relpath, (unsigned)len);
+    unsigned char b64[80];
+    uint32_t sum = 0;
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = (len - off > 48u) ? 48u : (len - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, data + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[FILED]%s\n", (char *)b64);
+        }
+        for (size_t i = 0; i < chunk; i++) sum += data[off + i];
+        off += chunk;
+    }
+    printf("[FILEX-END sum=%08lX]\n", (unsigned long)sum);
+    fflush(stdout);
+}
+
+/* Write a whole file: local SD if mounted, else stream to the host (Tab5). */
+static bool host_save_file(const char *relpath, const void *data, size_t len) {
+    char path[200];
+    snprintf(path, sizeof(path), "/sdcard/%s", relpath);
+    FILE *f = fopen(path, "wb");
+    if (f) { fwrite(data, 1, len, f); fclose(f); return true; }
+    host_stream_file(relpath, (const uint8_t *)data, len);
+    return true;
+}
+
+/* Append bytes to a file: local SD if mounted, else stream append frames. */
+static bool host_append_file(const char *relpath, const void *data, size_t len) {
+    char path[200];
+    snprintf(path, sizeof(path), "/sdcard/%s", relpath);
+    FILE *f = fopen(path, "a");
+    if (f) { fwrite(data, 1, len, f); fclose(f); return true; }
+    const uint8_t *p = (const uint8_t *)data;
+    unsigned char b64[80];
+    size_t off = 0;
+    while (off < len) {
+        size_t chunk = (len - off > 48u) ? 48u : (len - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, p + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[FILEA name=%s]%s\n", relpath, (char *)b64);
+        }
+        off += chunk;
+    }
+    fflush(stdout);
+    return true;
+}
+
+/* Append a printf-formatted chunk into a fixed buffer, tracking the offset and
+ * clamping on overflow. Used to build a whole log line in RAM before handing it to
+ * host_append_file() (which either writes a local SD or streams append frames). */
+static void host_bufcat(char *buf, size_t cap, size_t *off, const char *fmt, ...) {
+    if (!buf || cap == 0 || *off >= cap) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *off, cap - *off, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    *off += (size_t)n;
+    if (*off >= cap) *off = cap - 1;   /* truncated: keep offset in-bounds */
+}
+
+/* Format one line and append it via host_append_file() (local SD if mounted, else a
+ * [FILEA] stream frame to the host). A 1:1 drop-in for fprintf(file, ...) at rerouted
+ * incremental-append sites (wardrive CSV rows, KML placemarks, ...). */
+static void host_append_line(const char *relpath, const char *fmt, ...) {
+    char line[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;   /* truncated: send what fit */
+    host_append_file(relpath, line, (size_t)n);
+}
+
 static void *hs_snapshot_alloc(size_t size)
 {
     return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -27095,6 +27188,7 @@ static int cmd_ble_detect(int argc, char **argv) {
     printf("[BLE_DETECT_START] rc=%d (airtag/findmy/flock/meta/flipper)\n", rc);
     fflush(stdout);
     return 0;
+}
 /* ARTIFACT INVENTORY CONSOLE BEGIN */
 static ai_inventory_t *art_inventory;
 static ai_request_t art_request;
@@ -30462,6 +30556,7 @@ static void pcap_rate_limiter_task(void *param)
 static void pcap_writer_task(void *param) {
     (void)param;
     pcap_queued_frame_t *frame = NULL;
+    uint32_t flush_counter = 0;
 
     MY_LOG_INFO(TAG, "PCAP writer task started");
 

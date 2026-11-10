@@ -7,7 +7,10 @@
 /* These tables are linked by ESP-IDF's esp_wifi component from
  * regulatory/esp_wifi_regulatory.c. Use the same rules as the driver rather
  * than maintaining a second country/DFS database in the application. */
-extern const wifi_regdomain_t regdomain_table[WIFI_MAX_SUPPORT_COUNTRY_NUM];
+/* ESP-IDF 6.1 removed WIFI_MAX_SUPPORT_COUNTRY_NUM and made regdomain_table a
+ * sentinel-terminated array (last row cn="##"). Declare it unsized and stop the
+ * scan at the sentinel instead of a fixed count. */
+extern const wifi_regdomain_t regdomain_table[];
 extern const wifi_regulatory_t regulatory_data[];
 
 wifi_channel_policy_t wifi_channel_policy_classify(
@@ -16,7 +19,7 @@ wifi_channel_policy_t wifi_channel_policy_classify(
     if (country == NULL) return WIFI_CHANNEL_POLICY_UNKNOWN;
 
     const wifi_regulatory_t *rules = NULL;
-    for (size_t i = 0; i < WIFI_MAX_SUPPORT_COUNTRY_NUM; ++i) {
+    for (size_t i = 0; regdomain_table[i].cn[0] != '#'; ++i) {
         if (memcmp(regdomain_table[i].cn, country->cc, 2) == 0) {
             rules = &regulatory_data[regdomain_table[i].regulatory_type];
             break;
