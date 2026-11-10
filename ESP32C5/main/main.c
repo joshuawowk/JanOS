@@ -8532,6 +8532,32 @@ static void hs_sanitize_ssid(char *out, const char *in, size_t out_size) {
 }
 
 
+/* Stream a captured handshake pcap to the host (Tab5) over UART when the board
+ * has no local SD. Emits [PCAPX name=.. size=..]/[PCAPD]<b64>../[PCAPX-END sum=..]
+ * frames the clients parse. Verbatim from Josh's pre-merge no-SD fallback. */
+static void hs_stream_pcap_over_uart(const char *ssid_safe, const char *mac_suffix,
+                                     uint64_t ts, const uint8_t *buf, unsigned size) {
+    /* Random suffix so names stay unique across reboots: `ts` is uptime-ms, which
+     * resets to ~0 on every power-cycle (no RTC), so re-capturing an AP after a
+     * reset would otherwise reproduce the name and overwrite the earlier file. */
+    printf("[PCAPX name=%s_%s_%llu_%08lX.pcap size=%u]\n", ssid_safe, mac_suffix,
+           (unsigned long long)ts, (unsigned long)esp_random(), size);
+    unsigned char b64[80];
+    uint32_t sum = 0;
+    unsigned off = 0;
+    while (off < size) {
+        unsigned chunk = (size - off > 48u) ? 48u : (size - off);
+        size_t olen = 0;
+        if (mbedtls_base64_encode(b64, sizeof(b64), &olen, buf + off, chunk) == 0) {
+            b64[olen] = '\0';
+            printf("[PCAPD]%s\n", (char *)b64);
+        }
+        for (unsigned i = 0; i < chunk; i++) sum += buf[off + i];
+        off += chunk;
+    }
+    printf("[PCAPX-END sum=%08lX]\n", (unsigned long)sum);
+}
+
 /* ===== Josh no-SD streaming reroute helpers (re-applied on top of the upstream
  * storage refactor). The C5 has no SD, so captures/logs stream to the Tab5 over
  * UART. host_save_file()/host_append_file() write a local SD if present, else
@@ -8759,8 +8785,16 @@ static bool hs_save_handshake_snapshot_to_sd(
     
     FILE *f = fopen(pcap_part, "wb");
     if (!f) {
-        MY_LOG_INFO(TAG, "[HS-SAVE] Failed to open: %s", pcap_part);
-        return false;
+        // No local SD (e.g. MonsterC5): stream the handshake pcap to the host
+        // (Tab5) over UART instead. *timestamp_out is already set above; the
+        // capture already passed the publishability + session-generation checks
+        // at the top of this function. Return true so the caller emits the
+        // backward-compatible "PCAP saved:" / "HANDSHAKE IS COMPLETE AND VALID"
+        // lines the clients parse. Matches Josh's pre-merge no-SD fallback:
+        // only the pcap is streamed (no separate hccapx).
+        hs_stream_pcap_over_uart(ssid_safe, mac_suffix, timestamp,
+                                 snapshot->pcap, (unsigned)snapshot->pcap_size);
+        return true;
     }
     size_t written = fwrite(snapshot->pcap, 1, snapshot->pcap_size, f);
     int flush_rc = fflush(f);
