@@ -39,7 +39,10 @@ static void frame_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
             return;
     }
 
-    ESP_ERROR_CHECK(esp_event_post(SNIFFER_EVENTS, event_id, frame, frame->rx_ctrl.sig_len + sizeof(wifi_promiscuous_pkt_t), portMAX_DELAY));
+    // Runs in the promiscuous RX callback. Under heap pressure (portal + sniffer,
+    // or a frame flood) esp_event_post can return ESP_ERR_NO_MEM; ESP_ERROR_CHECK
+    // would abort and reboot the whole device. Drop the frame instead.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_event_post(SNIFFER_EVENTS, event_id, frame, frame->rx_ctrl.sig_len + sizeof(wifi_promiscuous_pkt_t), portMAX_DELAY));
 }
 
 /**
