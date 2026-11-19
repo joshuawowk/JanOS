@@ -6542,20 +6542,28 @@ static int cmd_select_networks(int argc, char **argv) {
 
     char buf[500];
     int len = snprintf(buf, sizeof(buf), "Selected Networks:\n");
+    // snprintf returns the length it WOULD have written, so len can exceed the
+    // buffer; clamp after each append or `sizeof(buf) - len` underflows (size_t)
+    // and the next snprintf writes out of bounds (up to 64 selectable networks).
+    if (len < 0) len = 0;
+    if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
 
     for (int i = 0; i < g_selected_count; ++i) {
         const wifi_ap_record_t* ap = &g_scan_results[g_selected_indices[i]];
-        
+
         // I assume auth is available as a string in your structure, if not - replace with appropriate field or string.
         const char* auth = authmode_to_string(ap->authmode);
 
         // Formatting: SSID, BSSID, Channel, Auth
-        len += snprintf(buf + len, sizeof(buf) - len, "%s, %02x:%02x:%02x:%02x:%02x:%02x, Ch%d, %s%s\n",
+        int n = snprintf(buf + len, sizeof(buf) - len, "%s, %02x:%02x:%02x:%02x:%02x:%02x, Ch%d, %s%s\n",
                         (char*)ap->ssid,
                         ap->bssid[0], ap->bssid[1], ap->bssid[2],
                         ap->bssid[3], ap->bssid[4], ap->bssid[5],
                         ap->primary, auth,
                         (i + 1 == g_selected_count) ? "" : "");
+        if (n < 0) break;
+        len += n;
+        if (len >= (int)sizeof(buf)) { len = (int)sizeof(buf) - 1; break; }
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -23552,8 +23560,11 @@ static void dns_server_task(void *pvParameters) {
         pos++; // Skip final 0
         pos += 4; // Skip QTYPE and QCLASS
         question_len = pos - 12;
-        
-        if (question_len > 0 && question_len < (DNS_MAX_PACKET_SIZE - 12 - 16)) {
+
+        // pos <= len: a crafted label length can push pos past the bytes actually
+        // received, so without this the memcpy below would copy (and echo back to
+        // the client) uninitialised stack / a previous packet's bytes.
+        if (question_len > 0 && pos <= len && question_len < (DNS_MAX_PACKET_SIZE - 12 - 16)) {
             memcpy(tx_buffer + 12, rx_buffer + 12, question_len);
             
             // Add answer section
@@ -25049,7 +25060,9 @@ static int cmd_start_rogueap(int argc, char **argv) {
     oled_display_update_full("> Rogue AP",
         argc >= 2 ? argv[1] : "  No SSID",
         "  WPA2 + Portal", "  Active...");
-    rogueap_mode_active = true;
+    // rogueap_mode_active is set only once the portal server is actually running
+    // (below), so a validation failure here does not strand the device in the
+    // "portal busy" state until reboot.
     log_memory_info("start_rogueap");
     
     // Validate arguments
@@ -25206,7 +25219,8 @@ static int cmd_start_rogueap(int argc, char **argv) {
     }
     
     MY_LOG_INFO(TAG, "HTTP server started successfully on port 80");
-    
+    rogueap_mode_active = true;  // portal is up: commit the busy state now
+
     // Register URI handlers (same as start_portal)
     httpd_uri_t root_uri = {
         .uri = "/",
@@ -29746,6 +29760,13 @@ static void parse_sae_commit(const wifi_promiscuous_pkt_t *pkt) {
         if (buf[28] == 0x4C) {
             const uint8_t *token = buf + 32;
             int token_len = len - 32;
+            // Clamp: inject_sae_commit_frame() echoes this token into a 256-byte
+            // stack frame after the header, 32-byte scalar, 64-byte point and a
+            // 2-byte EID/length, and writes the length as a single byte. An
+            // unbounded token (from a forged/oversized SAE commit in range)
+            // overflows that frame and the token_str VLA below. Real anti-clogging
+            // tokens are ~32 bytes; 100 leaves generous headroom and cannot overflow.
+            if (token_len > 100) token_len = 100;
 
             if (anti_clogging_token) free(anti_clogging_token);
             anti_clogging_token = malloc(token_len);
@@ -31950,7 +31971,14 @@ static bool parse_gps_nmea(const char* nmea_sentence) {
         strncpy(sentence, nmea_sentence, sizeof(sentence) - 1);
         sentence[sizeof(sentence) - 1] = '\0';
         
-        char *token = strtok(sentence, ",");
+        // strtok_r with a local save pointer: parse_gps_nmea() is called inside
+        // callers that are themselves mid-strtok over "\r\n" (the GPS read buffer).
+        // Plain strtok(",") here would clobber that shared state, so the caller's
+        // next strtok(NULL,"\r\n") lost its place and every sentence after a GGA
+        // (e.g. the RMC that seeds the clock) was silently dropped. Also decouples
+        // from save_portal_data()'s strtok on the HTTP task.
+        char *gga_save = NULL;
+        char *token = strtok_r(sentence, ",", &gga_save);
         int field = 0;
         float lat_deg = 0, lat_min = 0;
         float lon_deg = 0, lon_min = 0;
@@ -31992,7 +32020,7 @@ static bool parse_gps_nmea(const char* nmea_sentence) {
                     altitude = atof(token);
                     break;
             }
-            token = strtok(NULL, ",");
+            token = strtok_r(NULL, ",", &gga_save);
             field++;
         }
         

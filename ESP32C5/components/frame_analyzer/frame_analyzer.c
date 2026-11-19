@@ -64,7 +64,8 @@ static void data_frame_handler(void *args, esp_event_base_t event_base, int32_t 
         if((pmkid_items = parse_pmkid(eapol_key_packet)) == NULL){
             return;
         }
-        ESP_ERROR_CHECK(esp_event_post(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_PMKID, &pmkid_items, sizeof(pmkid_item_t *), portMAX_DELAY));
+        // Drop on heap pressure rather than aborting/rebooting the device.
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_event_post(FRAME_ANALYZER_EVENTS, DATA_FRAME_EVENT_PMKID, &pmkid_items, sizeof(pmkid_item_t *), portMAX_DELAY));
         return;
     }
 }
