@@ -31971,7 +31971,14 @@ static bool parse_gps_nmea(const char* nmea_sentence) {
         strncpy(sentence, nmea_sentence, sizeof(sentence) - 1);
         sentence[sizeof(sentence) - 1] = '\0';
         
-        char *token = strtok(sentence, ",");
+        // strtok_r with a local save pointer: parse_gps_nmea() is called inside
+        // callers that are themselves mid-strtok over "\r\n" (the GPS read buffer).
+        // Plain strtok(",") here would clobber that shared state, so the caller's
+        // next strtok(NULL,"\r\n") lost its place and every sentence after a GGA
+        // (e.g. the RMC that seeds the clock) was silently dropped. Also decouples
+        // from save_portal_data()'s strtok on the HTTP task.
+        char *gga_save = NULL;
+        char *token = strtok_r(sentence, ",", &gga_save);
         int field = 0;
         float lat_deg = 0, lat_min = 0;
         float lon_deg = 0, lon_min = 0;
@@ -32013,7 +32020,7 @@ static bool parse_gps_nmea(const char* nmea_sentence) {
                     altitude = atof(token);
                     break;
             }
-            token = strtok(NULL, ",");
+            token = strtok_r(NULL, ",", &gga_save);
             field++;
         }
         
