@@ -6,25 +6,26 @@
  * (SD owns the bus; this attaches as a second device with its own CS), exactly
  * like the nRF24 driver in this project.
  *
- * Default wiring: the CC1101 shares ONE swappable radio header with the nRF24
- * jammer on the SD SPI2 bus, so a CC1101 (sub-GHz) or an nRF24 (2.4 GHz) can be
- * socketed interchangeably -- one at a time -- and firmware auto-detects which is
- * present. The CC1101 CS/GDO0 sit on the exact pins the nRF24 uses for CSN/CE,
- * and the (unused) GDO2 is dropped:
- *   SCK=GPIO6  MOSI=GPIO8  MISO=GPIO5   (the SD bus)
- *   CS =GPIO3  GDO0=GPIO4               (== nRF24 CSN/CE -- the shared header)
- *   GDO2 disabled (-1)                  (never used by firmware)
- * MISO/MOSI were MOVED off GPIO2/GPIO7: both are ESP32-C5 strapping pins and the
- * DevKitC-1 stabilizes their boot state with a cap, which RC-limits them to
- * ~250 kHz SPI (measured) -- far below the 2 MHz the radios run at, so MISO on
- * GPIO2 never clocked data in. GPIO5/GPIO8 are clean, non-strapping pads (both
- * pass a 2 MHz self-drive loopback; run `spitest pad <n>` to re-verify).
- * Boot-safe: GPIO3 is a strapping pin but its only strap role is an unused SDIO
- * clock-edge bit; GPIO4/MTCK is not a strapping pin (boot mode = GPIO26/27/28).
- * The shared header needs a 10k external pull-up on GPIO3 (no internal pull on
- * MTMS/MTDI) and a 4.7k external pull-down on GPIO4 (to beat its ~45k internal
- * weak pull-up). GPIO15-22 are the in-package flash/PSRAM (MSPI) bus -- never
- * use them. GPIO11/12 are the console UART.
+ * Wiring (Seeed XIAO ESP32-C5): the CC1101 and the nRF24 each get their OWN
+ * dedicated chip-select and control pin, so BOTH radios can stay permanently
+ * soldered on the shared SPI2 bus at once -- there is no longer a shared header
+ * to physically swap (the firmware still runs one radio app at a time). The map
+ * is chosen to land on the XIAO's broken-out, boot-safe pads:
+ *   SCK=GPIO8(D8)  MOSI=GPIO10(D10)  MISO=GPIO9(D9)   (the shared SD/radio bus)
+ *   CC1101  CS=GPIO23(D4)  GDO0=GPIO24(D5)            (dedicated -- not shared)
+ *   nRF24   CS=GPIO1 (D0)  CE  =GPIO0 (D1)            (dedicated -- see nrf24_jammer.c)
+ *   SD      CS=GPIO25(D2)                             (shared bus, own CS)
+ *   GDO2 disabled (-1)                                (never used by firmware)
+ * Why these pads: on the XIAO the stock C5 radio pins are unreachable -- GPIO6 is
+ * the battery-sense pad (ADC_BAT) and GPIO5/3/4 are JTAG pads on the underside
+ * (MTDO/MTDI/MTCK). D8/D9/D10 are the XIAO's native, non-strapping SPI pads.
+ * ESP32-C5 strapping pins are GPIO2/3/7/25/26/27/28; of the pads used here only
+ * SD CS=GPIO25 is a strapping pin, and its strap role is non-critical for SPI
+ * boot (it idles high as a deselected CS). GPIO15-22 are the in-package
+ * flash/PSRAM (MSPI) bus -- never use them. GPIO11/12 (D6/D7) are the console
+ * UART to the Tab5 and stay put. Give each CS a 10k external pull-up and the
+ * nRF24 CE a 4.7k pull-down so the bus boots deselected and the PA stays off at
+ * reset. Pins stay override-guarded (define before include) if your wiring differs.
  */
 #pragma once
 
@@ -39,22 +40,22 @@ extern "C" {
 
 /* ---- Default pin map (override before cc1101_init if your wiring differs) ---- */
 #ifndef CC1101_PIN_SCK
-#define CC1101_PIN_SCK   6
+#define CC1101_PIN_SCK   8     /* XIAO D8 (native SCK), shared SPI2 bus */
 #endif
 #ifndef CC1101_PIN_MISO
-#define CC1101_PIN_MISO  5     /* moved off strapping GPIO2 (RC-loaded, SPI-slow) */
+#define CC1101_PIN_MISO  9     /* XIAO D9 (native MISO), shared SPI2 bus */
 #endif
 #ifndef CC1101_PIN_MOSI
-#define CC1101_PIN_MOSI  8     /* moved off strapping GPIO7 (RC-loaded, SPI-slow) */
+#define CC1101_PIN_MOSI  10    /* XIAO D10 (native MOSI), shared SPI2 bus */
 #endif
 #ifndef CC1101_PIN_CS
-#define CC1101_PIN_CS    3     /* shared with nRF24 CSN (swappable radio header) */
+#define CC1101_PIN_CS    23    /* XIAO D4 -- dedicated CC1101 CS (no longer shared with nRF24) */
 #endif
 #ifndef CC1101_PIN_GDO0
-#define CC1101_PIN_GDO0  4     /* shared with nRF24 CE  (swappable radio header) */
+#define CC1101_PIN_GDO0  24    /* XIAO D5 -- dedicated CC1101 GDO0 (no longer shared with nRF24) */
 #endif
 #ifndef CC1101_PIN_GDO2
-#define CC1101_PIN_GDO2  (-1)  /* dropped: unused by firmware, frees GPIO5 */
+#define CC1101_PIN_GDO2  (-1)  /* dropped: unused by firmware */
 #endif
 #ifndef CC1101_SPI_HOST
 #define CC1101_SPI_HOST  SPI2_HOST

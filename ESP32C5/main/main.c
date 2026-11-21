@@ -239,6 +239,10 @@
 #define BOOT_BUTTON_LONG_PRESS_MS      1000
 
 // GPS UART pins (Marauder compatible)
+// NOTE: GPIO13/14 are NOT broken out on the Seeed XIAO ESP32-C5. With both radios
+// + SD populated the XIAO has no spare top-edge pad left for a 2-wire GPS UART
+// (see docs), so GPS is unpopulated on the XIAO build. Keep the pins here for the
+// store-board / DevKitC builds that still expose GPIO13/14.
 #define GPS_UART_NUM       UART_NUM_1
 #define GPS_TX_PIN         13
 #define GPS_RX_PIN         14
@@ -246,11 +250,11 @@
 #define GPS_BAUD_ATGM336H  9600
 #define GPS_BAUD_M5STACK   115200
 
-// SD Card SPI pins (Marauder compatible)
-#define SD_MISO_PIN        5   /* moved off strapping GPIO2 (RC-loaded, SPI-slow) */
-#define SD_MOSI_PIN        8   /* moved off strapping GPIO7 (RC-loaded, SPI-slow) */
-#define SD_CLK_PIN         6
-#define SD_CS_PIN          10
+// SD Card SPI pins -- XIAO ESP32-C5 map: shares the radios' SPI2 bus, own CS.
+#define SD_MISO_PIN        9   /* XIAO D9 (native MISO), shared SPI2 bus */
+#define SD_MOSI_PIN        10  /* XIAO D10 (native MOSI), shared SPI2 bus */
+#define SD_CLK_PIN         8   /* XIAO D8 (native SCK), shared SPI2 bus */
+#define SD_CS_PIN          25  /* XIAO D2 -- own CS (strapping pin, idles high) */
 
 #define MY_LOG_INFO(tag, fmt, ...) printf("" fmt "\n", ##__VA_ARGS__)
 
