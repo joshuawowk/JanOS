@@ -17,18 +17,31 @@
 
 #define TAG "nrf24_jammer"
 
-/* Pin map: the nRF24 shares the SD card's SPI2 bus (SCK/MOSI/MISO) and uses its
- * own CS + CE. Change these if you wire the module differently. */
+/* Pin map (Seeed XIAO ESP32-C5): the nRF24 shares the SPI2 bus (SCK/MOSI/MISO)
+ * with the CC1101 and the SD card, but now has its OWN dedicated CS + CE on the
+ * XIAO's D0/D1 pads -- it no longer shares G3/G4 with the CC1101, so both radios
+ * can stay soldered down at once (firmware still runs one radio app at a time).
+ * Override-guarded: #define any of these before including to re-pin. */
+#ifndef NRF24_SPI_HOST
 #define NRF24_SPI_HOST   SPI2_HOST
-#define NRF24_SCK_PIN    6   /* shared with SD_CLK */
-#define NRF24_MOSI_PIN   8   /* shared with SD_MOSI (moved off strapping GPIO7) */
-#define NRF24_MISO_PIN   5   /* shared with SD_MISO (moved off strapping GPIO2) */
-#define NRF24_CS_PIN     3   /* dedicated chip-select (was CC1101 CS) */
-#define NRF24_CE_PIN     4   /* dedicated chip-enable (was CC1101 GDO0) */
-/* NOTE: GPIO2 (MTMS) and GPIO7 are ESP32-C5 strapping pins; the DevKitC-1 puts
- * a boot-stabilizing cap on them, so they only pass clean SPI up to ~250 kHz.
- * MISO/MOSI were moved to clean pins GPIO5/GPIO8 for full 2 MHz. Verified with
- * the `spitest pad <n>` scanner: 2 & 7 = RC-loaded, 5/8/9/6/3/4 = clean. */
+#endif
+#ifndef NRF24_SCK_PIN
+#define NRF24_SCK_PIN    8   /* XIAO D8 (native SCK), shared with CC1101 + SD_CLK */
+#endif
+#ifndef NRF24_MOSI_PIN
+#define NRF24_MOSI_PIN   10  /* XIAO D10 (native MOSI), shared with CC1101 + SD_MOSI */
+#endif
+#ifndef NRF24_MISO_PIN
+#define NRF24_MISO_PIN   9   /* XIAO D9 (native MISO), shared with CC1101 + SD_MISO */
+#endif
+#ifndef NRF24_CS_PIN
+#define NRF24_CS_PIN     1   /* XIAO D0 -- dedicated nRF24 CSN (no longer shared with CC1101) */
+#endif
+#ifndef NRF24_CE_PIN
+#define NRF24_CE_PIN     0   /* XIAO D1 -- dedicated nRF24 CE (no longer shared with CC1101) */
+#endif
+/* ESP32-C5 strapping pins are GPIO2/3/7/25/26/27/28; none of the nRF24 pins above
+ * land on one. D8/D9/D10 are the XIAO's clean, non-strapping native SPI pads. */
 
 /* PA max with the LNA bit set (RF_SETUP low nibble = 0b0111), matching the
  * Arduino RF24 setPALevel(RF24_PA_MAX, true). */
@@ -74,9 +87,9 @@ void nrf24_jammer_spi_selftest(void) {
     nrf24_spi_trx(&s_dev, tx, rx, 4, 100);
     printf("[SPI-TEST] tx=A5 3C 0F F0  rx=%02X %02X %02X %02X\n",
            rx[0], rx[1], rx[2], rx[3]);
-    printf("[SPI-TEST]  With MOSI(GPIO8) jumpered to MISO(GPIO5), nRF24 unplugged:\n");
-    printf("[SPI-TEST]   rx == tx (A5 3C 0F F0) => C5 SPI + GPIO2 are OK; fault is the module or its MISO wire.\n");
-    printf("[SPI-TEST]   rx all 00 / all FF     => GPIO2 / SPI2 not working on the C5 (firmware/board issue).\n");
+    printf("[SPI-TEST]  With MOSI(GPIO10) jumpered to MISO(GPIO9), nRF24 unplugged:\n");
+    printf("[SPI-TEST]   rx == tx (A5 3C 0F F0) => C5 SPI is OK; fault is the module or its MISO wire.\n");
+    printf("[SPI-TEST]   rx all 00 / all FF     => SPI2 not working on the C5 (firmware/board issue).\n");
     fflush(stdout);
 }
 
@@ -99,10 +112,12 @@ static bool ensure_dev(void) {
     return true;
 }
 
-/* Spare GPIO the firmware never wires to anything (GDO2 was dropped, freeing
- * GPIO5). Used purely as a scratch node for the internal loopback so the real
- * SPI pins (and their IO_MUX config) are never disturbed. */
-#define NRF24_LOOPBACK_SCRATCH_PIN 9   /* free clean pad; GPIO5 is now MISO */
+/* Spare GPIO the firmware never wires to anything (XIAO D3/GPIO7, left unused by
+ * the pin map above). Used purely as a scratch node for the internal loopback so
+ * the real SPI pins (and their IO_MUX config) are never disturbed. */
+#ifndef NRF24_LOOPBACK_SCRATCH_PIN
+#define NRF24_LOOPBACK_SCRATCH_PIN 7   /* free pad (D3); GPIO9 is now MISO */
+#endif
 
 void nrf24_jammer_spi_selftest_internal(void) {
     if (!ensure_dev()) return;
